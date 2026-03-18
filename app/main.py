@@ -577,6 +577,12 @@ class BindingRequestCreate(BaseModel):
     student_uid: str
 
 
+class ChatCreate(BaseModel):
+    external_userid: str
+    student_uid: str
+    message: str
+
+
 @app.get("/api/students/search")
 async def api_students_search(q: str = "", db: Session = Depends(get_db)):
     q = (q or "").strip()
@@ -676,6 +682,120 @@ async def api_binding_status(external_userid: str = "", db: Session = Depends(ge
         "approved_students": approved_students,
         "pending_requests": [{"request_id": p.id, "student_uid": p.student_uid, "created_at": p.created_at.isoformat()} for p in pending],
     }
+
+
+def _latest_week_key(db: Session) -> str:
+    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
+    return latest[0] if latest else ""
+
+
+async def answer_with_hydro_context_and_rag(
+    db: Session,
+    parent_key: str,
+    student_uid: str,
+    question: str,
+) -> dict:
+    """
+    Build LLM prompt with both:
+    - knowledge base (RAG via bm25 + stored chunks)
+    - student's Hydro weekly metrics snapshot (for factual questions)
+    """
+    # 1) get memory user
+    user = _get_or_create_user(db, parent_key)
+
+    # 2) memory
+    turns = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == user.id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(settings.memory_max_turns * 2)
+        .all()
+    )
+    turns = list(reversed(turns))
+
+    # 3) rag
+    hits = (rindex.search(question, settings.rag_top_k) if rindex else [])
+    ctx_lines = []
+    for i, (_chunk_id, text, _score) in enumerate(hits, start=1):
+        ctx_lines.append(f"[{i}] {text.strip()}")
+    ctx = "\n\n".join(ctx_lines)
+
+    # 4) hydro metrics (weekly snapshot)
+    week_key = _latest_week_key(db)
+    m = (
+        db.query(StudentWeeklyMetric)
+        .filter(StudentWeeklyMetric.week_key == week_key)
+        .filter(StudentWeeklyMetric.student_uid == student_uid)
+        .one_or_none()
+    )
+    if m is None:
+        hydro_text = "（未找到该学生的周数据，请先管理员拉取本周数据）"
+    else:
+        try:
+            groups = _json.loads(m.groups_json or "[]")
+        except Exception:
+            groups = []
+        hydro_text = (
+            f"学生UID：{m.student_uid}\n"
+            f"姓名：{m.name}\n"
+            f"分组：{', '.join(groups) if groups else '-'}\n"
+            f"排名：第 {m.rank} 名\n"
+            f"作业：{m.hw_title}\n"
+            f"作业完成：{m.hw_done}/{m.hw_total}\n"
+            f"本周AC：{m.week_ac} 题；本周提交：{m.week_submits} 次\n"
+            f"活跃天数：{m.active_days} 天；最近活跃：{m.last_active}\n"
+            f"周Key：{week_key}"
+        )
+
+    system = (
+        "你是面向家长的学业咨询助手。\n"
+        "你必须优先使用【学生Hydro周数据】回答涉及作业完成、刷题数、活跃天数、排名等事实问题。\n"
+        "若使用了【知识库】信息，请在句末用 [1]/[2] 标注来源编号。\n"
+        "回答要简洁中文、结构清晰、必要时给出下一步建议。\n"
+    )
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+    messages.append({"role": "system", "content": f"【学生Hydro周数据】\n{hydro_text}"})
+    if ctx:
+        messages.append({"role": "system", "content": f"【知识库】\n{ctx}"})
+
+    for t in turns:
+        if t.role in ("user", "assistant"):
+            messages.append({"role": t.role, "content": t.content})
+    messages.append({"role": "user", "content": question})
+
+    reply = await deepseek_chat(messages)
+
+    db.add(ChatMessage(user_id=user.id, role="user", content=question))
+    db.add(ChatMessage(user_id=user.id, role="assistant", content=reply))
+    db.commit()
+
+    return {"reply": reply, "week_key": week_key, "hydro_found": m is not None}
+
+
+@app.post("/api/chat")
+async def api_chat(payload: ChatCreate, db: Session = Depends(get_db)):
+    external_userid = payload.external_userid.strip()
+    student_uid = payload.student_uid.strip()
+    message = (payload.message or "").strip()
+    if not external_userid or not student_uid or not message:
+        raise HTTPException(status_code=400, detail="external_userid, student_uid, message required")
+
+    parent = db.query(ParentContact).filter(ParentContact.external_userid == external_userid).one_or_none()
+    if parent is None:
+        raise HTTPException(status_code=404, detail="parent not found, please sync first")
+
+    binding = (
+        db.query(ParentStudentBinding)
+        .filter(ParentStudentBinding.parent_id == parent.id)
+        .filter(ParentStudentBinding.student_uid == student_uid)
+        .one_or_none()
+    )
+    if binding is None:
+        raise HTTPException(status_code=403, detail="student not approved for this parent yet")
+
+    parent_key = f"parent:{external_userid}:student:{student_uid}"
+    res = await answer_with_hydro_context_and_rag(db, parent_key, student_uid, message)
+    return {"reply": res["reply"], "week_key": res["week_key"]}
 
 
 @app.get("/admin/binding-requests", response_class=HTMLResponse)
