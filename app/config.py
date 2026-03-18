@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     # Storage
     data_dir: str = "./data"
 
+    # Hydro (via SSH)
+    hydro_ssh_host: str = ""
+    hydro_ssh_user: str = ""
+    hydro_ssh_key_path: str = ""
+
+    # WeCom Customer Contact (externalcontact) for outbound reports
+    # The follow-up member userid used as sender in add_msg_template
+    wecom_external_sender_id: str = ""
+
 
 settings = Settings()
 

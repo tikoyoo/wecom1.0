@@ -64,6 +64,52 @@ class Chunk(Base):
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
 
+class ParentContact(Base):
+    """
+    External parent contact in WeCom Customer Contact (externalcontact).
+    """
+
+    __tablename__ = "parent_contacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    external_userid: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    remark: Mapped[str] = mapped_column(String(256), default="")
+    follow_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    bindings: Mapped[list["ParentStudentBinding"]] = relationship(back_populates="parent", cascade="all, delete-orphan")
+
+
+class ParentStudentBinding(Base):
+    """
+    Manual binding between parent (external_userid) and Hydro student uid.
+    Supports multiple parents per student.
+    """
+
+    __tablename__ = "parent_student_bindings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[int] = mapped_column(ForeignKey("parent_contacts.id"), index=True)
+    student_uid: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    parent: Mapped["ParentContact"] = relationship(back_populates="bindings")
+
+
+class HydroCache(Base):
+    """
+    Cached Hydro weekly stats per student uid to enforce rate limits.
+    """
+
+    __tablename__ = "hydro_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 

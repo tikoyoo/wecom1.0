@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
@@ -11,10 +12,13 @@ from sqlalchemy.orm import Session
 from .admin import html_page, require_admin
 from .config import settings
 from .db import ChatMessage, Document, User, get_db, init_db
+from .db import ParentContact, ParentStudentBinding
+from .hydro_service import get_weekly_students
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
 from .wecom_api import send_text
 from .wecom_crypto import WeComCrypto
+from .wecom_external_api import add_msg_template_single, get_external_contact, list_external_contacts
 from .wecom_kf_api import kf_send_text, kf_sync_msg
 from .wecom_kf_xml import parse_kf_event_xml
 from .wecom_xml import (
@@ -248,6 +252,8 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/docs">知识库管理</a></div>
       <div><a href="/admin/chats">会话记录</a></div>
       <div><a href="/admin/push">主动推送</a></div>
+      <div><a href="/admin/parents">家长通讯录（客户联系）</a></div>
+      <div><a href="/admin/reports">周报/群发</a></div>
     </div>
     """
     return html_page("Admin", body)
@@ -372,4 +378,167 @@ async def admin_push_post(
 ):
     await send_text(touser=touser.strip(), content=content.strip())
     return Response(status_code=303, headers={"Location": "/admin/push"})
+
+
+@app.get("/admin/parents", response_class=HTMLResponse)
+async def admin_parents(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    parents = db.query(ParentContact).order_by(ParentContact.updated_at.desc()).limit(200).all()
+    rows = "".join(
+        f"<tr><td>{p.external_userid[:10]}...</td><td>{p.name}</td><td>{p.remark}</td><td><code>{p.follow_userid}</code></td></tr>"
+        for p in parents
+    )
+    body = f"""
+    <h2>家长通讯录（客户联系）</h2>
+    <div class="card">
+      <form action="/admin/parents/sync" method="post">
+        <div style="margin-bottom:10px">
+          <label>跟进人 userid（sender）</label>
+          <input name="follow_userid" placeholder="例如：YangShengPin" value="{settings.wecom_external_sender_id}" />
+        </div>
+        <button type="submit">同步外部联系人</button>
+      </form>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>external_userid</th><th>名称</th><th>备注</th><th>跟进人</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Parents", body)
+
+
+@app.post("/admin/parents/sync")
+async def admin_parents_sync(
+    follow_userid: str = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    follow_userid = follow_userid.strip()
+    ids = await list_external_contacts(follow_userid)
+    for eid in ids:
+        info = await get_external_contact(eid)
+        ext = info.get("external_contact") or {}
+        name = ext.get("name") or ""
+        follow = (info.get("follow_user") or [{}])[0] if isinstance(info.get("follow_user"), list) else {}
+        remark = follow.get("remark") or ""
+
+        row = db.query(ParentContact).filter(ParentContact.external_userid == eid).one_or_none()
+        if row is None:
+            row = ParentContact(external_userid=eid, name=name, remark=remark, follow_userid=follow_userid)
+            db.add(row)
+        else:
+            row.name = name
+            row.remark = remark
+            row.follow_userid = follow_userid
+            row.updated_at = datetime.utcnow()
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/parents"})
+
+
+@app.get("/admin/reports", response_class=HTMLResponse)
+async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    body = f"""
+    <h2>周报/群发</h2>
+    <div class="card">
+      <form action="/admin/reports/weekly/preview" method="post">
+        <div style="margin-bottom:10px">
+          <label>跟进人 sender（用于客户联系群发）</label>
+          <input name="sender" value="{settings.wecom_external_sender_id}" />
+        </div>
+        <button type="submit">拉取本周数据（预览）</button>
+      </form>
+    </div>
+    <div class="card">
+      <form action="/admin/reports/weekly/send" method="post">
+        <div style="margin-bottom:10px">
+          <label>跟进人 sender</label>
+          <input name="sender" value="{settings.wecom_external_sender_id}" />
+        </div>
+        <button type="submit">一键群发本周周报（按绑定关系）</button>
+      </form>
+      <div style="margin-top:8px;color:#666;font-size:12px">
+        注：群发会对每个已绑定家长创建一条 externalcontact 群发任务。
+      </div>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Reports", body)
+
+
+def _render_weekly_report(s: dict) -> str:
+    hw = s.get("hw_info") or {}
+    return (
+        f"📊 {s.get('name','')} 的学习周报\n\n"
+        f"👤 UID：{s.get('uid')}\n"
+        f"📈 当前排名：第 {s.get('rank','-')} 名\n\n"
+        f"📚 本周作业：{hw.get('title','无')}\n"
+        f"✅ 完成情况：{hw.get('done',0)}/{hw.get('total',0)}\n\n"
+        f"💡 本周AC：{(s.get('dim2') or {}).get('ac',0)} 题\n"
+        f"📝 本周提交：{(s.get('dim2') or {}).get('submits',0)} 次\n"
+        f"🔥 活跃天数：{(s.get('dim3') or {}).get('days',0)} 天（最近：{(s.get('dim3') or {}).get('last','无')}）\n\n"
+        f"有问题随时联系我。"
+    )
+
+
+@app.post("/admin/reports/weekly/preview", response_class=HTMLResponse)
+async def admin_weekly_preview(sender: str = Form(...), db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    sender = sender.strip()
+    data = get_weekly_students(db, force_refresh=True)
+    body_rows = ""
+    for s in data[:50]:
+        body_rows += f"<tr><td>{s.get('uid')}</td><td>{s.get('name')}</td><td>{s.get('rank')}</td><td>{(s.get('hw_info') or {}).get('done')}/{(s.get('hw_info') or {}).get('total')}</td></tr>"
+    body = f"""
+    <h2>本周数据预览（前50）</h2>
+    <div class="card"><code>sender={sender}</code></div>
+    <div class="card">
+      <table>
+        <thead><tr><th>UID</th><th>姓名</th><th>排名</th><th>作业</th></tr></thead>
+        <tbody>{body_rows}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/reports">返回</a></div>
+    """
+    return html_page("Weekly Preview", body)
+
+
+@app.post("/admin/reports/weekly/send", response_class=HTMLResponse)
+async def admin_weekly_send(sender: str = Form(...), db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    sender = sender.strip()
+    if not sender:
+        raise HTTPException(status_code=400, detail="sender required")
+
+    weekly = get_weekly_students(db, force_refresh=True)
+    by_uid = {str(s.get("uid")): s for s in weekly if s.get("uid") is not None}
+
+    bindings = db.query(ParentStudentBinding).all()
+    ok = 0
+    fail = 0
+    errs: list[str] = []
+    for b in bindings:
+        s = by_uid.get(b.student_uid)
+        if not s:
+            continue
+        content = _render_weekly_report(s)
+        try:
+            await add_msg_template_single(external_userid=b.parent.external_userid, content=content, sender_userid=sender)
+            ok += 1
+        except Exception as e:
+            fail += 1
+            errs.append(f"{b.parent.external_userid[:10]}... uid={b.student_uid}: {e}")
+
+    err_html = "<br/>".join(errs[:20])
+    body = f"""
+    <h2>周报群发完成</h2>
+    <div class="card">
+      成功：<b>{ok}</b>，失败：<b>{fail}</b>
+    </div>
+    <div class="card">
+      <div style="color:#666">失败示例（最多20条）</div>
+      <div style="white-space:pre-wrap">{err_html or "无"}</div>
+    </div>
+    <div><a href="/admin/reports">返回</a></div>
+    """
+    return html_page("Weekly Send", body)
 
