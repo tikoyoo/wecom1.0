@@ -14,7 +14,7 @@ from .config import settings
 from .db import ChatMessage, Document, User, get_db, init_db
 import json as _json
 
-from .db import ParentContact, ParentStudentBinding, StudentWeeklyMetric
+from .db import ExternalSendLog, ParentContact, ParentStudentBinding, StudentWeeklyMetric
 from .hydro_service import get_weekly_students
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
@@ -557,6 +557,30 @@ async def admin_bindings_delete(
 
 @app.get("/admin/reports", response_class=HTMLResponse)
 async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
+    latest_week = latest[0] if latest else ""
+    # quick list of groups from latest week (best-effort)
+    group_set: set[str] = set()
+    if latest_week:
+        rows = db.query(StudentWeeklyMetric.groups_json).filter(StudentWeeklyMetric.week_key == latest_week).limit(1000).all()
+        for (gj,) in rows:
+            try:
+                for g in _json.loads(gj or "[]"):
+                    if isinstance(g, str) and g.strip():
+                        group_set.add(g.strip())
+            except Exception:
+                continue
+    group_options = "".join(f"<option value='{g}'></option>" for g in sorted(group_set))
+
+    logs = db.query(ExternalSendLog).order_by(ExternalSendLog.created_at.desc()).limit(50).all()
+    log_rows = "".join(
+        f"<tr><td>{l.created_at}</td><td><code>{l.week_key}</code></td><td><code>{l.sender_userid}</code></td>"
+        f"<td>{l.group_filter or '-'}</td><td>{'是' if l.only_unfinished else '否'}</td>"
+        f"<td><code>{l.student_uid}</code></td><td><code>{l.external_userid[:10]}...</code></td>"
+        f"<td>{l.status}</td><td><code>{l.msgid}</code></td><td style='max-width:360px;white-space:pre-wrap'>{(l.error or '')[:120]}</td></tr>"
+        for l in logs
+    )
+
     body = f"""
     <h2>周报/群发</h2>
     <div class="card">
@@ -564,6 +588,18 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
         <div style="margin-bottom:10px">
           <label>跟进人 sender（用于客户联系群发）</label>
           <input name="sender" value="{settings.wecom_external_sender_id}" />
+        </div>
+        <div style="margin-bottom:10px">
+          <label>week_key（默认最新，例如：2026-W12）</label>
+          <input name="week" value="{latest_week}" />
+        </div>
+        <div style="margin-bottom:10px">
+          <label>分组/班级筛选（Hydro groups，留空表示全部）</label>
+          <input name="group" list="group_list" placeholder="例如：四班" />
+          <datalist id="group_list">{group_options}</datalist>
+        </div>
+        <div style="margin-bottom:10px">
+          <label><input type="checkbox" name="only_unfinished" /> 仅未完成作业（done &lt; total 且 total&gt;0）</label>
         </div>
         <button type="submit">拉取本周数据（预览）</button>
       </form>
@@ -574,11 +610,32 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
           <label>跟进人 sender</label>
           <input name="sender" value="{settings.wecom_external_sender_id}" />
         </div>
+        <div style="margin-bottom:10px">
+          <label>week_key</label>
+          <input name="week" value="{latest_week}" />
+        </div>
+        <div style="margin-bottom:10px">
+          <label>分组/班级筛选</label>
+          <input name="group" list="group_list" placeholder="例如：四班" />
+        </div>
+        <div style="margin-bottom:10px">
+          <label><input type="checkbox" name="only_unfinished" /> 仅未完成作业</label>
+        </div>
         <button type="submit">一键群发本周周报（按绑定关系）</button>
       </form>
       <div style="margin-top:8px;color:#666;font-size:12px">
-        注：群发会对每个已绑定家长创建一条 externalcontact 群发任务。
+        注：群发会对每个已绑定家长创建一条 externalcontact 群发任务，并记录结果到“最近发送记录”。
       </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">最近发送记录（最多50条）</h3>
+      <table>
+        <thead><tr>
+          <th>时间</th><th>周</th><th>sender</th><th>分组</th><th>仅未完成</th>
+          <th>UID</th><th>external_userid</th><th>状态</th><th>msgid</th><th>错误</th>
+        </tr></thead>
+        <tbody>{log_rows}</tbody>
+      </table>
     </div>
     <div><a href="/admin/">返回</a></div>
     """
@@ -660,18 +717,65 @@ def _render_weekly_report(s: dict) -> str:
 
 
 @app.post("/admin/reports/weekly/preview", response_class=HTMLResponse)
-async def admin_weekly_preview(sender: str = Form(...), db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+async def admin_weekly_preview(
+    sender: str = Form(...),
+    week: str = Form(""),
+    group: str = Form(""),
+    only_unfinished: str = Form(""),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
     sender = sender.strip()
-    data = get_weekly_students(db, force_refresh=True)
+    week = (week or "").strip()
+    group = (group or "").strip()
+    only_unfinished_bool = bool(only_unfinished)
+
+    # refresh from hydro and persist weekly metrics
+    get_weekly_students(db, force_refresh=True)
+
+    if not week:
+        latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
+        week = latest[0] if latest else ""
+
+    rows_q = db.query(StudentWeeklyMetric)
+    if week:
+        rows_q = rows_q.filter(StudentWeeklyMetric.week_key == week)
+    rows = rows_q.order_by(StudentWeeklyMetric.rank.asc()).all()
+
+    filtered: list[StudentWeeklyMetric] = []
+    for r in rows:
+        if group:
+            try:
+                gs = _json.loads(r.groups_json or "[]")
+                if group not in gs:
+                    continue
+            except Exception:
+                continue
+        if only_unfinished_bool and (r.hw_total <= 0 or r.hw_done >= r.hw_total):
+            continue
+        filtered.append(r)
+
     body_rows = ""
-    for s in data[:50]:
-        body_rows += f"<tr><td>{s.get('uid')}</td><td>{s.get('name')}</td><td>{s.get('rank')}</td><td>{(s.get('hw_info') or {}).get('done')}/{(s.get('hw_info') or {}).get('total')}</td></tr>"
+    for r in filtered[:80]:
+        body_rows += f"<tr><td><code>{r.student_uid}</code></td><td>{r.name}</td><td>{r.rank}</td><td>{r.hw_done}/{r.hw_total}</td><td>{r.week_ac}</td><td>{r.active_days}</td></tr>"
+
+    bindings = db.query(ParentStudentBinding).all()
+    uid_has_parent = {b.student_uid for b in bindings}
+    will_send_students = [r for r in filtered if r.student_uid in uid_has_parent]
+    will_send_parents = sum(1 for b in bindings if any(r.student_uid == b.student_uid for r in will_send_students))
+
     body = f"""
     <h2>本周数据预览（前50）</h2>
-    <div class="card"><code>sender={sender}</code></div>
+    <div class="card">
+      <div><code>sender={sender}</code></div>
+      <div><code>week={week or '-'}</code> <code>group={group or '-'}</code> <code>only_unfinished={'1' if only_unfinished_bool else '0'}</code></div>
+      <div style="margin-top:6px;color:#666;font-size:12px">
+        筛选后学生数：<b>{len(filtered)}</b>；其中已绑定可发送学生数：<b>{len(will_send_students)}</b>；预计发送家长数（按绑定条数）：<b>{will_send_parents}</b>
+      </div>
+    </div>
     <div class="card">
       <table>
-        <thead><tr><th>UID</th><th>姓名</th><th>排名</th><th>作业</th></tr></thead>
+        <thead><tr><th>UID</th><th>姓名</th><th>排名</th><th>作业</th><th>本周AC</th><th>活跃天数</th></tr></thead>
         <tbody>{body_rows}</tbody>
       </table>
     </div>
@@ -681,12 +785,30 @@ async def admin_weekly_preview(sender: str = Form(...), db: Session = Depends(ge
 
 
 @app.post("/admin/reports/weekly/send", response_class=HTMLResponse)
-async def admin_weekly_send(sender: str = Form(...), db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+async def admin_weekly_send(
+    sender: str = Form(...),
+    week: str = Form(""),
+    group: str = Form(""),
+    only_unfinished: str = Form(""),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
     sender = sender.strip()
     if not sender:
         raise HTTPException(status_code=400, detail="sender required")
 
+    week = (week or "").strip()
+    group = (group or "").strip()
+    only_unfinished_bool = bool(only_unfinished)
+
+    # refresh from hydro and persist weekly metrics
     weekly = get_weekly_students(db, force_refresh=True)
+    # infer week key if not provided
+    if not week:
+        latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
+        week = latest[0] if latest else ""
+
+    # build dict for report rendering from raw hydro payload (keeps existing format)
     by_uid = {str(s.get("uid")): s for s in weekly if s.get("uid") is not None}
 
     bindings = db.query(ParentStudentBinding).all()
@@ -694,14 +816,64 @@ async def admin_weekly_send(sender: str = Form(...), db: Session = Depends(get_d
     fail = 0
     errs: list[str] = []
     for b in bindings:
-        s = by_uid.get(b.student_uid)
-        if not s:
+        s_raw = by_uid.get(b.student_uid)
+        if not s_raw:
             continue
-        content = _render_weekly_report(s)
+
+        # apply filters using metrics table (more reliable)
+        m = (
+            db.query(StudentWeeklyMetric)
+            .filter(StudentWeeklyMetric.week_key == week)
+            .filter(StudentWeeklyMetric.student_uid == b.student_uid)
+            .one_or_none()
+        )
+        if m is None:
+            continue
+        if group:
+            try:
+                gs = _json.loads(m.groups_json or "[]")
+                if group not in gs:
+                    continue
+            except Exception:
+                continue
+        if only_unfinished_bool and (m.hw_total <= 0 or m.hw_done >= m.hw_total):
+            continue
+
+        content = _render_weekly_report(s_raw)
         try:
-            await add_msg_template_single(external_userid=b.parent.external_userid, content=content, sender_userid=sender)
+            resp = await add_msg_template_single(external_userid=b.parent.external_userid, content=content, sender_userid=sender)
+            db.add(
+                ExternalSendLog(
+                    week_key=week,
+                    sender_userid=sender,
+                    group_filter=group,
+                    only_unfinished=1 if only_unfinished_bool else 0,
+                    student_uid=b.student_uid,
+                    external_userid=b.parent.external_userid,
+                    status="ok",
+                    msgid=str(resp.get("msgid") or resp.get("msg_id") or ""),
+                    response_json=_json.dumps(resp, ensure_ascii=False),
+                    error="",
+                )
+            )
+            db.commit()
             ok += 1
         except Exception as e:
+            db.add(
+                ExternalSendLog(
+                    week_key=week,
+                    sender_userid=sender,
+                    group_filter=group,
+                    only_unfinished=1 if only_unfinished_bool else 0,
+                    student_uid=b.student_uid,
+                    external_userid=b.parent.external_userid,
+                    status="fail",
+                    msgid="",
+                    response_json="",
+                    error=str(e),
+                )
+            )
+            db.commit()
             fail += 1
             errs.append(f"{b.parent.external_userid[:10]}... uid={b.student_uid}: {e}")
 

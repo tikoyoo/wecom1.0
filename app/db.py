@@ -134,6 +134,29 @@ class StudentWeeklyMetric(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
+class ExternalSendLog(Base):
+    """
+    Outbound send log for externalcontact add_msg_template.
+    """
+
+    __tablename__ = "external_send_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    week_key: Mapped[str] = mapped_column(String(16), index=True)
+    sender_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
+    group_filter: Mapped[str] = mapped_column(String(128), default="", index=True)
+    only_unfinished: Mapped[int] = mapped_column(Integer, default=0)
+
+    student_uid: Mapped[str] = mapped_column(String(64), default="", index=True)
+    external_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
+
+    status: Mapped[str] = mapped_column(String(16), default="ok")  # ok/fail
+    msgid: Mapped[str] = mapped_column(String(128), default="")
+    response_json: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 
