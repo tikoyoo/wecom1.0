@@ -413,6 +413,17 @@ async def admin_parents(db: Session = Depends(get_db), _user: str = Depends(requ
     return html_page("Parents", body)
 
 
+@app.get("/admin/parents/sync-error", response_class=HTMLResponse)
+async def admin_parents_sync_error(msg: str = "", _user: str = Depends(require_admin)):
+    msg = (msg or "").strip()
+    body = f"""
+    <h2>同步外部联系人失败</h2>
+    <div class="card" style="white-space:pre-wrap">{msg or "未知错误"}</div>
+    <div><a href="/admin/parents">返回</a></div>
+    """
+    return html_page("Parents Sync Error", body)
+
+
 @app.post("/admin/parents/sync")
 async def admin_parents_sync(
     follow_userid: str = Form(...),
@@ -420,25 +431,28 @@ async def admin_parents_sync(
     _user: str = Depends(require_admin),
 ):
     follow_userid = follow_userid.strip()
-    ids = await list_external_contacts(follow_userid)
-    for eid in ids:
-        info = await get_external_contact(eid)
-        ext = info.get("external_contact") or {}
-        name = ext.get("name") or ""
-        follow = (info.get("follow_user") or [{}])[0] if isinstance(info.get("follow_user"), list) else {}
-        remark = follow.get("remark") or ""
+    try:
+        ids = await list_external_contacts(follow_userid)
+        for eid in ids:
+            info = await get_external_contact(eid)
+            ext = info.get("external_contact") or {}
+            name = ext.get("name") or ""
+            follow = (info.get("follow_user") or [{}])[0] if isinstance(info.get("follow_user"), list) else {}
+            remark = follow.get("remark") or ""
 
-        row = db.query(ParentContact).filter(ParentContact.external_userid == eid).one_or_none()
-        if row is None:
-            row = ParentContact(external_userid=eid, name=name, remark=remark, follow_userid=follow_userid)
-            db.add(row)
-        else:
-            row.name = name
-            row.remark = remark
-            row.follow_userid = follow_userid
-            row.updated_at = datetime.utcnow()
-    db.commit()
-    return Response(status_code=303, headers={"Location": "/admin/parents"})
+            row = db.query(ParentContact).filter(ParentContact.external_userid == eid).one_or_none()
+            if row is None:
+                row = ParentContact(external_userid=eid, name=name, remark=remark, follow_userid=follow_userid)
+                db.add(row)
+            else:
+                row.name = name
+                row.remark = remark
+                row.follow_userid = follow_userid
+                row.updated_at = datetime.utcnow()
+        db.commit()
+        return Response(status_code=303, headers={"Location": "/admin/parents"})
+    except Exception as e:
+        return Response(status_code=303, headers={"Location": f"/admin/parents/sync-error?msg={str(e)}"})
 
 
 @app.get("/admin/bindings", response_class=HTMLResponse)
@@ -617,7 +631,7 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
     <h2>周报/群发</h2>
     <div class="card">
       <div style="color:#666;font-size:12px;margin-bottom:8px">
-        提示：先在 <a href="/admin/reports/weekly/preview">预览</a> 看筛选效果，再群发；也可以在下表点“选择该分组”快速填充筛选条件。
+        提示：先用下方“拉取本周数据（预览）”看筛选效果，再群发；也可以在下表点“选择该分组”快速填充筛选条件。
       </div>
       <table>
         <thead><tr><th>分组/班级</th><th>学生数</th><th>已绑定学生数</th><th>未完成作业学生数</th><th>操作</th></tr></thead>
