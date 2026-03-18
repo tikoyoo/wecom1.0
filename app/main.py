@@ -16,6 +16,7 @@ import json as _json
 
 from .db import ExternalSendLog, ParentContact, ParentStudentBinding, StudentWeeklyMetric
 from .hydro_service import get_weekly_students
+from .reports_service import render_weekly_report
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
 from .wecom_api import send_text
@@ -642,7 +643,7 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
       <form action="/admin/reports/weekly/preview" method="post">
         <div style="margin-bottom:10px">
           <label>跟进人 sender（用于客户联系群发）</label>
-          <input name="sender" value="{settings.wecom_external_sender_id}" />
+          <input name="sender" value="{settings.wecom_external_sender_id}" placeholder="例如：YangShengPin" />
         </div>
         <div style="margin-bottom:10px">
           <label>week_key（默认最新，例如：2026-W12）</label>
@@ -663,7 +664,7 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
       <form action="/admin/reports/weekly/send" method="post">
         <div style="margin-bottom:10px">
           <label>跟进人 sender</label>
-          <input name="sender" value="{settings.wecom_external_sender_id}" />
+          <input name="sender" value="{settings.wecom_external_sender_id}" placeholder="例如：YangShengPin" />
         </div>
         <div style="margin-bottom:10px">
           <label>week_key</label>
@@ -756,31 +757,16 @@ async def admin_students(week: str = "", q: str = "", db: Session = Depends(get_
     return html_page("Students", body)
 
 
-def _render_weekly_report(s: dict) -> str:
-    hw = s.get("hw_info") or {}
-    return (
-        f"📊 {s.get('name','')} 的学习周报\n\n"
-        f"👤 UID：{s.get('uid')}\n"
-        f"📈 当前排名：第 {s.get('rank','-')} 名\n\n"
-        f"📚 本周作业：{hw.get('title','无')}\n"
-        f"✅ 完成情况：{hw.get('done',0)}/{hw.get('total',0)}\n\n"
-        f"💡 本周AC：{(s.get('dim2') or {}).get('ac',0)} 题\n"
-        f"📝 本周提交：{(s.get('dim2') or {}).get('submits',0)} 次\n"
-        f"🔥 活跃天数：{(s.get('dim3') or {}).get('days',0)} 天（最近：{(s.get('dim3') or {}).get('last','无')}）\n\n"
-        f"有问题随时联系我。"
-    )
-
-
 @app.post("/admin/reports/weekly/preview", response_class=HTMLResponse)
 async def admin_weekly_preview(
-    sender: str = Form(...),
+    sender: str = Form(""),
     week: str = Form(""),
     group: str = Form(""),
     only_unfinished: str = Form(""),
     db: Session = Depends(get_db),
     _user: str = Depends(require_admin),
 ):
-    sender = sender.strip()
+    sender = (sender or "").strip() or (settings.wecom_external_sender_id or "").strip()
     week = (week or "").strip()
     group = (group or "").strip()
     only_unfinished_bool = bool(only_unfinished)
@@ -841,16 +827,16 @@ async def admin_weekly_preview(
 
 @app.post("/admin/reports/weekly/send", response_class=HTMLResponse)
 async def admin_weekly_send(
-    sender: str = Form(...),
+    sender: str = Form(""),
     week: str = Form(""),
     group: str = Form(""),
     only_unfinished: str = Form(""),
     db: Session = Depends(get_db),
     _user: str = Depends(require_admin),
 ):
-    sender = sender.strip()
+    sender = (sender or "").strip() or (settings.wecom_external_sender_id or "").strip()
     if not sender:
-        raise HTTPException(status_code=400, detail="sender required")
+        raise HTTPException(status_code=400, detail="sender required (set WECOM_EXTERNAL_SENDER_ID or fill the form)")
 
     week = (week or "").strip()
     group = (group or "").strip()
@@ -894,7 +880,7 @@ async def admin_weekly_send(
         if only_unfinished_bool and (m.hw_total <= 0 or m.hw_done >= m.hw_total):
             continue
 
-        content = _render_weekly_report(s_raw)
+        content = render_weekly_report(s_raw)
         try:
             resp = await add_msg_template_single(external_userid=b.parent.external_userid, content=content, sender_userid=sender)
             db.add(
