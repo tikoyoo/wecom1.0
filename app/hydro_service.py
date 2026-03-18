@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import HydroCache
+from .db import HydroCache, StudentWeeklyMetric
 
 
 @dataclass(frozen=True)
@@ -149,6 +149,42 @@ def get_weekly_students(db: Session, force_refresh: bool = False) -> list[dict]:
     else:
         cache.payload_json = payload
         cache.fetched_at = now.replace(tzinfo=None)
+    db.commit()
+
+    # persist into weekly metrics table
+    iso = now.isocalendar()
+    week_key = f"{iso.year}-W{iso.week:02d}"
+    for s in data:
+        uid = str(s.get("uid") or "").strip()
+        if not uid:
+            continue
+        hw = s.get("hw_info") or {}
+        dim2 = s.get("dim2") or {}
+        dim3 = s.get("dim3") or {}
+        groups = s.get("groups") or []
+        row = (
+            db.query(StudentWeeklyMetric)
+            .filter(StudentWeeklyMetric.week_key == week_key)
+            .filter(StudentWeeklyMetric.student_uid == uid)
+            .one_or_none()
+        )
+        if row is None:
+            row = StudentWeeklyMetric(week_key=week_key, student_uid=uid)
+            db.add(row)
+        row.name = str(s.get("name") or "")
+        try:
+            row.rank = int(s.get("rank") or 999)
+        except Exception:
+            row.rank = 999
+        row.groups_json = json.dumps(groups, ensure_ascii=False)
+        row.hw_title = str(hw.get("title") or "")
+        row.hw_done = int(hw.get("done") or 0)
+        row.hw_total = int(hw.get("total") or 0)
+        row.week_submits = int(dim2.get("submits") or 0)
+        row.week_ac = int(dim2.get("ac") or 0)
+        row.active_days = int(dim3.get("days") or 0)
+        row.last_active = str(dim3.get("last") or "")
+        row.updated_at = datetime.utcnow()
     db.commit()
     return data
 

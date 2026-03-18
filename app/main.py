@@ -12,7 +12,9 @@ from sqlalchemy.orm import Session
 from .admin import html_page, require_admin
 from .config import settings
 from .db import ChatMessage, Document, User, get_db, init_db
-from .db import ParentContact, ParentStudentBinding
+import json as _json
+
+from .db import ParentContact, ParentStudentBinding, StudentWeeklyMetric
 from .hydro_service import get_weekly_students
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
@@ -254,6 +256,7 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/push">主动推送</a></div>
       <div><a href="/admin/parents">家长通讯录（客户联系）</a></div>
       <div><a href="/admin/bindings">家长-学生绑定</a></div>
+      <div><a href="/admin/students">学生五维数据</a></div>
       <div><a href="/admin/reports">周报/群发</a></div>
     </div>
     """
@@ -580,6 +583,65 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
     <div><a href="/admin/">返回</a></div>
     """
     return html_page("Reports", body)
+
+
+@app.get("/admin/students", response_class=HTMLResponse)
+async def admin_students(week: str = "", q: str = "", db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    week = (week or "").strip()
+    q = (q or "").strip()
+
+    # default to latest week_key
+    if not week:
+        latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
+        week = latest[0] if latest else ""
+
+    rows_q = db.query(StudentWeeklyMetric)
+    if week:
+        rows_q = rows_q.filter(StudentWeeklyMetric.week_key == week)
+    if q:
+        like = f"%{q}%"
+        rows_q = rows_q.filter((StudentWeeklyMetric.student_uid.like(like)) | (StudentWeeklyMetric.name.like(like)))
+    rows = rows_q.order_by(StudentWeeklyMetric.rank.asc()).limit(500).all()
+
+    tr = ""
+    for r in rows:
+        try:
+            groups = ", ".join(_json.loads(r.groups_json or "[]"))
+        except Exception:
+            groups = ""
+        tr += (
+            f"<tr><td><code>{r.student_uid}</code></td><td>{r.name}</td><td>{r.rank}</td>"
+            f"<td>{groups}</td><td>{r.hw_title}</td><td>{r.hw_done}/{r.hw_total}</td>"
+            f"<td>{r.week_ac}</td><td>{r.week_submits}</td><td>{r.active_days}</td><td>{r.last_active}</td></tr>"
+        )
+
+    body = f"""
+    <h2>学生五维数据（按周）</h2>
+    <div class="card">
+      <form method="get" action="/admin/students">
+        <div style="display:flex;gap:10px;align-items:center">
+          <input name="week" placeholder="例如：2026-W12" value="{week}" style="width:180px" />
+          <input name="q" placeholder="按UID/姓名搜索" value="{q}" />
+          <button type="submit">查询</button>
+          <a href="/admin/students" style="margin-left:6px">最新</a>
+        </div>
+      </form>
+      <div style="margin-top:10px;color:#666;font-size:12px">
+        数据来源：Hydro 周数据拉取。每次你点击“周报预览/群发”都会刷新并写入这一周数据；后续会改成每周一自动更新。
+      </div>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr>
+          <th>UID</th><th>姓名</th><th>排名</th><th>分组</th><th>作业</th><th>作业进度</th>
+          <th>本周AC</th><th>本周提交</th><th>活跃天数</th><th>最近活跃</th>
+        </tr></thead>
+        <tbody>{tr}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Students", body)
 
 
 def _render_weekly_report(s: dict) -> str:

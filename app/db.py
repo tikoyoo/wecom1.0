@@ -110,6 +110,30 @@ class HydroCache(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
+class StudentWeeklyMetric(Base):
+    """
+    Weekly metrics snapshot per Hydro student uid.
+    One row per (week_key, student_uid). week_key uses ISO week like "2026-W12".
+    """
+
+    __tablename__ = "student_weekly_metrics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_key: Mapped[str] = mapped_column(String(16), index=True)
+    student_uid: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    rank: Mapped[int] = mapped_column(Integer, default=999)
+    groups_json: Mapped[str] = mapped_column(Text, default="[]")
+    hw_title: Mapped[str] = mapped_column(String(256), default="")
+    hw_done: Mapped[int] = mapped_column(Integer, default=0)
+    hw_total: Mapped[int] = mapped_column(Integer, default=0)
+    week_submits: Mapped[int] = mapped_column(Integer, default=0)
+    week_ac: Mapped[int] = mapped_column(Integer, default=0)
+    active_days: Mapped[int] = mapped_column(Integer, default=0)
+    last_active: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 
