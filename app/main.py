@@ -253,6 +253,7 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/chats">会话记录</a></div>
       <div><a href="/admin/push">主动推送</a></div>
       <div><a href="/admin/parents">家长通讯录（客户联系）</a></div>
+      <div><a href="/admin/bindings">家长-学生绑定</a></div>
       <div><a href="/admin/reports">周报/群发</a></div>
     </div>
     """
@@ -435,6 +436,120 @@ async def admin_parents_sync(
             row.updated_at = datetime.utcnow()
     db.commit()
     return Response(status_code=303, headers={"Location": "/admin/parents"})
+
+
+@app.get("/admin/bindings", response_class=HTMLResponse)
+async def admin_bindings(q: str = "", db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    q = (q or "").strip()
+    parents_q = db.query(ParentContact)
+    if q:
+        like = f"%{q}%"
+        parents_q = parents_q.filter((ParentContact.name.like(like)) | (ParentContact.remark.like(like)) | (ParentContact.external_userid.like(like)))
+    parents = parents_q.order_by(ParentContact.updated_at.desc()).limit(300).all()
+
+    # list existing bindings (latest first)
+    bindings = db.query(ParentStudentBinding).order_by(ParentStudentBinding.created_at.desc()).limit(500).all()
+    b_rows = "".join(
+        f"<tr><td>{b.id}</td><td>{b.parent.name}</td><td><code>{b.parent.external_userid[:10]}...</code></td>"
+        f"<td><code>{b.student_uid}</code></td><td>{b.created_at}</td>"
+        f"<td><form action='/admin/bindings/delete' method='post' style='margin:0'>"
+        f"<input type='hidden' name='binding_id' value='{b.id}'/>"
+        f"<button class='secondary' type='submit'>解绑</button></form></td></tr>"
+        for b in bindings
+    )
+
+    p_rows = ""
+    for p in parents:
+        p_rows += (
+            "<tr>"
+            f"<td>{p.name}</td>"
+            f"<td>{p.remark}</td>"
+            f"<td><code>{p.external_userid}</code></td>"
+            f"<td><code>{p.follow_userid}</code></td>"
+            "<td>"
+            "<form action='/admin/bindings/set' method='post' style='display:flex;gap:8px;align-items:center;margin:0'>"
+            f"<input type='hidden' name='external_userid' value='{p.external_userid}'/>"
+            "<input name='student_uid' placeholder='填学生UID(可多个家长绑定同一UID)' style='width:220px'/>"
+            "<button type='submit'>绑定</button>"
+            "</form>"
+            "</td>"
+            "</tr>"
+        )
+
+    body = f"""
+    <h2>家长-学生绑定</h2>
+    <div class="card">
+      <form method="get" action="/admin/bindings">
+        <div style="display:flex;gap:10px;align-items:center">
+          <input name="q" placeholder="按姓名/备注/external_userid 搜索" value="{q}" />
+          <button type="submit">搜索</button>
+          <a href="/admin/bindings" style="margin-left:6px">清空</a>
+        </div>
+      </form>
+      <div style="margin-top:10px;color:#666;font-size:12px">
+        说明：先在“家长通讯录”同步外部联系人，再在这里把家长绑定到 Hydro 学生 UID（支持一生多家长）。
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">新增绑定（从家长列表）</h3>
+      <table>
+        <thead><tr><th>家长名称</th><th>备注</th><th>external_userid</th><th>跟进人</th><th>绑定到学生UID</th></tr></thead>
+        <tbody>{p_rows}</tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">已有绑定（最多500条）</h3>
+      <table>
+        <thead><tr><th>ID</th><th>家长</th><th>external_userid</th><th>学生UID</th><th>时间</th><th>操作</th></tr></thead>
+        <tbody>{b_rows}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Bindings", body)
+
+
+@app.post("/admin/bindings/set")
+async def admin_bindings_set(
+    external_userid: str = Form(...),
+    student_uid: str = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    external_userid = external_userid.strip()
+    student_uid = student_uid.strip()
+    if not external_userid or not student_uid:
+        raise HTTPException(status_code=400, detail="external_userid and student_uid required")
+
+    parent = db.query(ParentContact).filter(ParentContact.external_userid == external_userid).one_or_none()
+    if parent is None:
+        raise HTTPException(status_code=404, detail="parent not found, sync first")
+
+    exists = (
+        db.query(ParentStudentBinding)
+        .filter(ParentStudentBinding.parent_id == parent.id)
+        .filter(ParentStudentBinding.student_uid == student_uid)
+        .one_or_none()
+    )
+    if exists is None:
+        db.add(ParentStudentBinding(parent_id=parent.id, student_uid=student_uid))
+        db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/bindings"})
+
+
+@app.post("/admin/bindings/delete")
+async def admin_bindings_delete(
+    binding_id: int = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    row = db.query(ParentStudentBinding).filter(ParentStudentBinding.id == binding_id).one_or_none()
+    if row is not None:
+        db.delete(row)
+        db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/bindings"})
 
 
 @app.get("/admin/reports", response_class=HTMLResponse)
