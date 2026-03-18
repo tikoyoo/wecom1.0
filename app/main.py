@@ -561,16 +561,48 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
     latest_week = latest[0] if latest else ""
     # quick list of groups from latest week (best-effort)
     group_set: set[str] = set()
+    group_stats: dict[str, dict[str, int]] = {}
     if latest_week:
-        rows = db.query(StudentWeeklyMetric.groups_json).filter(StudentWeeklyMetric.week_key == latest_week).limit(1000).all()
-        for (gj,) in rows:
+        rows = (
+            db.query(
+                StudentWeeklyMetric.student_uid,
+                StudentWeeklyMetric.groups_json,
+                StudentWeeklyMetric.hw_done,
+                StudentWeeklyMetric.hw_total,
+            )
+            .filter(StudentWeeklyMetric.week_key == latest_week)
+            .limit(5000)
+            .all()
+        )
+
+        # precompute which student_uids have at least one parent binding
+        bound_uids = {uid for (uid,) in db.query(ParentStudentBinding.student_uid).distinct().all()}
+
+        for uid, gj, hw_done, hw_total in rows:
             try:
-                for g in _json.loads(gj or "[]"):
-                    if isinstance(g, str) and g.strip():
-                        group_set.add(g.strip())
+                gs = [g.strip() for g in _json.loads(gj or "[]") if isinstance(g, str) and g.strip()]
             except Exception:
-                continue
+                gs = []
+            if not gs:
+                gs = ["(未分组)"]
+            for g in gs:
+                group_set.add(g)
+                st = group_stats.setdefault(g, {"students": 0, "bound_students": 0, "unfinished": 0})
+                st["students"] += 1
+                if str(uid) in bound_uids:
+                    st["bound_students"] += 1
+                if (hw_total or 0) > 0 and (hw_done or 0) < (hw_total or 0):
+                    st["unfinished"] += 1
     group_options = "".join(f"<option value='{g}'></option>" for g in sorted(group_set))
+
+    # group stats table
+    stat_rows = ""
+    for g in sorted(group_stats.keys()):
+        st = group_stats[g]
+        stat_rows += (
+            f"<tr><td><code>{g}</code></td><td>{st['students']}</td><td>{st['bound_students']}</td><td>{st['unfinished']}</td>"
+            f"<td><a href='/admin/reports?week={latest_week}&group={g}'>选择该分组</a></td></tr>"
+        )
 
     logs = db.query(ExternalSendLog).order_by(ExternalSendLog.created_at.desc()).limit(50).all()
     log_rows = "".join(
@@ -583,6 +615,15 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
 
     body = f"""
     <h2>周报/群发</h2>
+    <div class="card">
+      <div style="color:#666;font-size:12px;margin-bottom:8px">
+        提示：先在 <a href="/admin/reports/weekly/preview">预览</a> 看筛选效果，再群发；也可以在下表点“选择该分组”快速填充筛选条件。
+      </div>
+      <table>
+        <thead><tr><th>分组/班级</th><th>学生数</th><th>已绑定学生数</th><th>未完成作业学生数</th><th>操作</th></tr></thead>
+        <tbody>{stat_rows or "<tr><td colspan='5'>暂无统计（请先拉取本周数据）</td></tr>"}</tbody>
+      </table>
+    </div>
     <div class="card">
       <form action="/admin/reports/weekly/preview" method="post">
         <div style="margin-bottom:10px">
