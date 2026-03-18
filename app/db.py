@@ -157,6 +157,23 @@ class ExternalSendLog(Base):
     error: Mapped[str] = mapped_column(Text, default="")
 
 
+class BindingRequest(Base):
+    """
+    Pending binding request from a parent (external_userid) to a student (hydro uid).
+    Teacher approval will convert it into ParentStudentBinding.
+    """
+
+    __tablename__ = "binding_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    external_userid: Mapped[str] = mapped_column(String(128), index=True)
+    student_uid: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/approved/rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    reviewer: Mapped[str] = mapped_column(String(128), default="")
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 

@@ -5,8 +5,9 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .admin import html_page, require_admin
@@ -14,7 +15,7 @@ from .config import settings
 from .db import ChatMessage, Document, User, get_db, init_db
 import json as _json
 
-from .db import ExternalSendLog, ParentContact, ParentStudentBinding, StudentWeeklyMetric
+from .db import BindingRequest, ExternalSendLog, ParentContact, ParentStudentBinding, StudentWeeklyMetric
 from .hydro_service import get_weekly_students
 from .reports_service import render_weekly_report
 from .llm import deepseek_chat
@@ -257,6 +258,7 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/push">主动推送</a></div>
       <div><a href="/admin/parents">家长通讯录（客户联系）</a></div>
       <div><a href="/admin/bindings">家长-学生绑定</a></div>
+      <div><a href="/admin/binding-requests">待审批绑定请求</a></div>
       <div><a href="/admin/students">学生五维数据</a></div>
       <div><a href="/admin/reports">周报/群发</a></div>
     </div>
@@ -568,6 +570,195 @@ async def admin_bindings_delete(
         db.delete(row)
         db.commit()
     return Response(status_code=303, headers={"Location": "/admin/bindings"})
+
+
+class BindingRequestCreate(BaseModel):
+    external_userid: str
+    student_uid: str
+
+
+@app.get("/api/students/search")
+async def api_students_search(q: str = "", db: Session = Depends(get_db)):
+    q = (q or "").strip()
+    if not q:
+        return {"week_key": "", "results": []}
+    # Ensure cache is ready (Hydro refresh at most once per hour).
+    get_weekly_students(db, force_refresh=False)
+
+    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
+    week_key = latest[0] if latest else ""
+    rows_q = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == week_key)
+    like = f"%{q}%"
+    rows_q = rows_q.filter(
+        (StudentWeeklyMetric.student_uid.like(like)) | (StudentWeeklyMetric.name.like(like))
+    ).order_by(StudentWeeklyMetric.rank.asc()).limit(20)
+    rows = rows_q.all()
+    results = []
+    for r in rows:
+        try:
+            groups = _json.loads(r.groups_json or "[]")
+        except Exception:
+            groups = []
+        results.append(
+            {
+                "student_uid": r.student_uid,
+                "name": r.name,
+                "groups": groups,
+                "rank": r.rank,
+                "hw_done": r.hw_done,
+                "hw_total": r.hw_total,
+            }
+        )
+    return {"week_key": week_key, "results": results}
+
+
+@app.post("/api/binding-requests")
+async def api_create_binding_request(payload: BindingRequestCreate, db: Session = Depends(get_db)):
+    """
+    Parent submits binding request: (external_userid -> student_uid).
+    Teacher approval will turn it into ParentStudentBinding.
+    """
+    external_userid = payload.external_userid.strip()
+    student_uid = payload.student_uid.strip()
+    if not external_userid or not student_uid:
+        raise HTTPException(status_code=400, detail="external_userid and student_uid required")
+
+    # Validate external_userid exists in WeCom (cheap auth).
+    try:
+        await get_external_contact(external_userid)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"invalid external_userid: {e}")
+
+    # Prevent duplicate pending requests
+    parent = db.query(ParentContact).filter(ParentContact.external_userid == external_userid).one_or_none()
+    if parent is None:
+        # Parent must be synced first for binding approval flow.
+        raise HTTPException(status_code=404, detail="parent not synced. please visit /admin/parents sync first.")
+
+    existing_pending = (
+        db.query(BindingRequest)
+        .filter(BindingRequest.external_userid == external_userid)
+        .filter(BindingRequest.student_uid == student_uid)
+        .filter(BindingRequest.status == "pending")
+        .one_or_none()
+    )
+    if existing_pending is not None:
+        return {"request_id": existing_pending.id, "status": existing_pending.status}
+
+    # If already approved, treat as already bound.
+    approved = (
+        db.query(ParentStudentBinding)
+        .filter(ParentStudentBinding.parent_id == parent.id)
+        .filter(ParentStudentBinding.student_uid == student_uid)
+        .one_or_none()
+    )
+    if approved is not None:
+        return {"request_id": None, "status": "approved"}
+
+    row = BindingRequest(external_userid=external_userid, student_uid=student_uid, status="pending")
+    db.add(row)
+    db.commit()
+    return {"request_id": row.id, "status": row.status}
+
+
+@app.get("/api/binding-status")
+async def api_binding_status(external_userid: str = "", db: Session = Depends(get_db)):
+    external_userid = (external_userid or "").strip()
+    if not external_userid:
+        raise HTTPException(status_code=400, detail="external_userid required")
+    parent = db.query(ParentContact).filter(ParentContact.external_userid == external_userid).one_or_none()
+    if parent is None:
+        return {"approved_students": [], "pending_requests": []}
+
+    approved_students = [b.student_uid for b in db.query(ParentStudentBinding).filter(ParentStudentBinding.parent_id == parent.id).all()]
+    pending = db.query(BindingRequest).filter(BindingRequest.external_userid == external_userid).order_by(BindingRequest.created_at.desc()).limit(10).all()
+    return {
+        "approved_students": approved_students,
+        "pending_requests": [{"request_id": p.id, "student_uid": p.student_uid, "created_at": p.created_at.isoformat()} for p in pending],
+    }
+
+
+@app.get("/admin/binding-requests", response_class=HTMLResponse)
+async def admin_binding_requests(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
+    week_key = latest[0] if latest else ""
+    rows = (
+        db.query(BindingRequest)
+        .filter(BindingRequest.status == "pending")
+        .order_by(BindingRequest.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    tr = ""
+    for r in rows:
+        student = (
+            db.query(StudentWeeklyMetric)
+            .filter(StudentWeeklyMetric.week_key == week_key)
+            .filter(StudentWeeklyMetric.student_uid == r.student_uid)
+            .one_or_none()
+        )
+        student_name = student.name if student else ""
+        tr += (
+            f"<tr><td>{r.id}</td>"
+            f"<td>{r.external_userid}</td>"
+            f"<td><code>{r.student_uid}</code></td>"
+            f"<td>{student_name}</td>"
+            f"<td>{r.created_at}</td>"
+            f"<td style='white-space:nowrap'>"
+            f"<form action='/admin/binding-requests/approve' method='post' style='display:inline'>"
+            f"<input type='hidden' name='request_id' value='{r.id}'/><button type='submit'>通过</button></form>"
+            f"<form action='/admin/binding-requests/reject' method='post' style='display:inline;margin-left:10px'>"
+            f"<input type='hidden' name='request_id' value='{r.id}'/><button class='secondary' type='submit'>拒绝</button></form>"
+            f"</td></tr>"
+        )
+
+    body = f"""
+    <h2>待审批的绑定请求</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>ID</th><th>external_userid</th><th>student_uid</th><th>学生姓名</th><th>时间</th><th>操作</th></tr></thead>
+        <tbody>{tr or "<tr><td colspan='6'>暂无待审批</td></tr>"}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Binding Requests", body)
+
+
+@app.post("/admin/binding-requests/approve")
+async def admin_binding_requests_approve(request_id: int = Form(...), db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    row = db.query(BindingRequest).filter(BindingRequest.id == request_id).one_or_none()
+    if row is None or row.status != "pending":
+        raise HTTPException(status_code=404, detail="request not found or not pending")
+    parent = db.query(ParentContact).filter(ParentContact.external_userid == row.external_userid).one_or_none()
+    if parent is None:
+        raise HTTPException(status_code=400, detail="parent not synced")
+    row.status = "approved"
+    row.reviewed_at = datetime.utcnow()
+    row.reviewer = _user
+    # create binding if missing
+    exists = (
+        db.query(ParentStudentBinding)
+        .filter(ParentStudentBinding.parent_id == parent.id)
+        .filter(ParentStudentBinding.student_uid == row.student_uid)
+        .one_or_none()
+    )
+    if exists is None:
+        db.add(ParentStudentBinding(parent_id=parent.id, student_uid=row.student_uid))
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
+
+
+@app.post("/admin/binding-requests/reject")
+async def admin_binding_requests_reject(request_id: int = Form(...), db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    row = db.query(BindingRequest).filter(BindingRequest.id == request_id).one_or_none()
+    if row is None or row.status != "pending":
+        raise HTTPException(status_code=404, detail="request not found or not pending")
+    row.status = "rejected"
+    row.reviewed_at = datetime.utcnow()
+    row.reviewer = _user
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
 
 
 @app.get("/admin/reports", response_class=HTMLResponse)
