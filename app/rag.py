@@ -29,6 +29,12 @@ def tokenize_zh(text: str) -> list[str]:
     return [t.strip() for t in jieba.lcut(text) if t.strip()]
 
 
+def _keyword_tokens(text: str) -> list[str]:
+    toks = tokenize_zh(text)
+    # keep useful keywords, avoid single punctuation-like fragments
+    return [t for t in toks if len(t) >= 2]
+
+
 @dataclass
 class RagIndex:
     chunk_ids: list[int]
@@ -50,8 +56,23 @@ class RagIndex:
             return []
         q = tokenize_zh(query)
         scores = self.bm25.get_scores(q)
-        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
-        return [(self.chunk_ids[i], self.chunk_texts[i], float(scores[i])) for i in ranked]
+        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        picked = [i for i in ranked if float(scores[i]) > 0][:top_k]
+        if picked:
+            return [(self.chunk_ids[i], self.chunk_texts[i], float(scores[i])) for i in picked]
+
+        # fallback: simple keyword containment when BM25 scores are all zero
+        kws = _keyword_tokens(query)
+        if not kws:
+            return []
+        contains_rank: list[tuple[int, int]] = []
+        for i, txt in enumerate(self.chunk_texts):
+            hit = sum(1 for k in kws if k in txt)
+            if hit > 0:
+                contains_rank.append((i, hit))
+        contains_rank.sort(key=lambda x: x[1], reverse=True)
+        out_idx = [i for i, _ in contains_rank[:top_k]]
+        return [(self.chunk_ids[i], self.chunk_texts[i], 0.0) for i in out_idx]
 
 
 def add_document_with_chunks(db: Session, title: str, filename: str, content: str) -> int:
