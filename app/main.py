@@ -746,6 +746,28 @@ async def admin_push_post(
 @app.get("/admin/reports", response_class=HTMLResponse)
 async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
     sch = _load_weekly_schedule()
+    latest_week = _latest_week_key(db)
+    class_count: dict[str, int] = {}
+    if latest_week:
+        wrows = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == latest_week).all()
+        for w in wrows:
+            try:
+                groups = json.loads(w.groups_json or "[]")
+            except Exception:
+                groups = []
+            for g in groups:
+                gn = str(g).strip()
+                if gn:
+                    class_count[gn] = class_count.get(gn, 0) + 1
+    class_rows = "".join(
+        f"<tr><td>{html.escape(k)}</td><td>{v}</td><td><button type='button' onclick=\"fillGroup('{html.escape(k, quote=True)}')\">使用</button></td></tr>"
+        for k, v in sorted(class_count.items(), key=lambda x: (-x[1], x[0]))
+    )
+    class_tip = (
+        f"<div>最新周：<code>{html.escape(latest_week)}</code>，共 <code>{len(class_count)}</code> 个班级</div>"
+        if latest_week
+        else "<div>暂无周数据，请先在“学生名录”执行周同步。</div>"
+    )
     logs = db.query(ExternalSendLog).order_by(ExternalSendLog.id.desc()).limit(50).all()
     rows = "".join(
         f"<tr><td>{l.created_at}</td><td>{html.escape(l.week_key)}</td><td>{html.escape(l.group_filter or '全量')}</td>"
@@ -762,8 +784,16 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
       <div><strong>最近执行日期：</strong>{html.escape(str(sch.get('last_run_date') or '无'))}</div>
     </div>
     <div class="card">
+      <h3>班级分类（来自 Hydro 最新周分组）</h3>
+      {class_tip}
+      <table>
+        <thead><tr><th>班级</th><th>人数</th><th>快速填入</th></tr></thead>
+        <tbody>{class_rows or '<tr><td colspan="3">暂无班级数据</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="card">
       <form action="/admin/reports/send-now" method="post">
-        <div style="margin-bottom:10px"><label>班级（可选，留空=全量）</label><input name="group" placeholder="例如 高一1班" /></div>
+        <div style="margin-bottom:10px"><label>班级（可选，留空=全量）</label><input id="send-group" name="group" placeholder="例如 高一1班" /></div>
         <div style="margin-bottom:10px"><label><input type="checkbox" name="only_unfinished" value="1" /> 仅发送作业未完成学生</label></div>
         <button type="submit">立即发送周报</button>
       </form>
@@ -772,7 +802,7 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
       <form action="/admin/reports/schedule" method="post">
         <div style="margin-bottom:10px"><label><input type="checkbox" name="enabled" value="1" {'checked' if sch.get('enabled') else ''}/> 开启定时发送</label></div>
         <div style="margin-bottom:10px"><label>时间（HH:MM）</label><input name="time_hhmm" value="{html.escape(str(sch.get('time_hhmm') or '07:30'))}" /></div>
-        <div style="margin-bottom:10px"><label>默认班级（可选）</label><input name="group" value="{html.escape(str(sch.get('group') or ''), quote=True)}" /></div>
+        <div style="margin-bottom:10px"><label>默认班级（可选）</label><input id="schedule-group" name="group" value="{html.escape(str(sch.get('group') or ''), quote=True)}" /></div>
         <div style="margin-bottom:10px"><label><input type="checkbox" name="only_unfinished" value="1" {'checked' if sch.get('only_unfinished') else ''}/> 默认仅未完成</label></div>
         <button type="submit">保存定时配置</button>
       </form>
@@ -785,6 +815,14 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
       </table>
     </div>
     <div><a href="/admin/">返回</a></div>
+    <script>
+      function fillGroup(v) {{
+        var a = document.getElementById('send-group');
+        var b = document.getElementById('schedule-group');
+        if (a) a.value = v;
+        if (b) b.value = v;
+      }}
+    </script>
     """
     return html_page("Reports", body)
 
