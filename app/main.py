@@ -21,6 +21,7 @@ from .db import (
     BindingNameRequest,
     ChatMessage,
     Document,
+    ExternalContact,
     ExternalSendLog,
     ParentStudentBinding,
     StudentRecord,
@@ -34,6 +35,7 @@ from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
 from .reports_service import send_weekly_reports
 from .wecom_api import send_text
+from .wecom_external_api import get_external_contact, list_external_userids
 from .wecom_crypto import WeComCrypto
 from .wecom_xml import (
     build_encrypted_reply_xml,
@@ -225,6 +227,20 @@ def _parse_op_ids() -> set[str]:
     if not raw:
         return set()
     return {x.strip() for x in re.split(r"[,\s|]+", raw) if x.strip()}
+
+
+def _guess_uid_from_text(*texts: str) -> str:
+    for t in texts:
+        s = (t or "").strip()
+        if not s:
+            continue
+        # 常见写法：37 / id:37 / uid=abc_01
+        m = re.search(r"(?:uid|id|学号|hydro)[\s:=：-]*([A-Za-z0-9_-]{1,32})", s, flags=re.IGNORECASE)
+        if m:
+            return m.group(1)
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", s):
+            return s
+    return ""
 
 
 async def _weekly_scheduler_loop() -> None:
@@ -595,6 +611,7 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/docs">知识库管理</a></div>
       <div><a href="/admin/chats">会话记录</a></div>
       <div><a href="/admin/reports">周报发送</a></div>
+      <div><a href="/admin/external-contacts">外部联系人同步与匹配</a></div>
       <div><a href="/admin/students">学生名录（小程序姓名匹配）</a></div>
       <div><a href="/admin/bindings">已匹配成功（家长绑定）</a></div>
       <div><a href="/admin/weekly-files">每周学生更新数据文件</a></div>
@@ -770,6 +787,145 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
     <div><a href="/admin/">返回</a></div>
     """
     return html_page("Reports", body)
+
+
+@app.get("/admin/external-contacts", response_class=HTMLResponse)
+async def admin_external_contacts(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    latest_week = _latest_week_key(db)
+    group_map: dict[str, str] = {}
+    if latest_week:
+        week_rows = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == latest_week).all()
+        for w in week_rows:
+            try:
+                gs = json.loads(w.groups_json or "[]")
+            except Exception:
+                gs = []
+            group_map[w.student_uid] = "、".join([str(x) for x in gs]) if gs else ""
+
+    contacts = db.query(ExternalContact).order_by(ExternalContact.updated_at.desc()).limit(500).all()
+    uid_name = {s.student_uid: s.display_name for s in db.query(StudentRecord).all()}
+    rows = "".join(
+        (
+            f"<tr><td><code>{html.escape(c.external_userid)}</code></td>"
+            f"<td>{html.escape(c.name)}</td>"
+            f"<td><code>{html.escape(c.follow_userid)}</code></td>"
+            f"<td>{html.escape(c.remark)}</td>"
+            f"<td><code>{html.escape(c.student_uid_hint or '')}</code></td>"
+            f"<td>{html.escape(uid_name.get(c.student_uid_hint, ''))}</td>"
+            f"<td>{html.escape(group_map.get(c.student_uid_hint, ''))}</td>"
+            f"<td>"
+            f"<form action='/admin/external-contacts/link' method='post' style='display:flex;gap:6px;align-items:center'>"
+            f"<input type='hidden' name='external_userid' value='{html.escape(c.external_userid, quote=True)}' />"
+            f"<input name='student_uid' value='{html.escape(c.student_uid_hint or '', quote=True)}' style='width:120px' placeholder='HYDRO ID' />"
+            f"<button type='submit'>保存匹配</button></form></td></tr>"
+        )
+        for c in contacts
+    )
+    body = f"""
+    <h2>外部联系人同步与匹配</h2>
+    <p>自动拉取 external_userid，优先从备注中识别 HYDRO ID；可手工修正 HYDRO ID 并保存。</p>
+    <div class="card">
+      <form action="/admin/external-contacts/sync" method="post">
+        <div style="margin-bottom:10px">
+          <label>跟进成员 userid（默认取 WECOM_EXTERNAL_SENDER_ID）</label>
+          <input name="follower_userid" placeholder="例如 yangshengpin" />
+        </div>
+        <button type="submit">同步外部联系人并自动匹配</button>
+      </form>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>external_userid</th><th>昵称</th><th>跟进人</th><th>备注</th><th>HYDRO ID</th><th>学生姓名</th><th>班级</th><th>操作</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("External contacts", body)
+
+
+@app.post("/admin/external-contacts/sync")
+async def admin_external_contacts_sync(
+    follower_userid: str = Form(""),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    uid = (follower_userid or "").strip() or (settings.wecom_external_sender_id or "").strip()
+    if not uid:
+        return Response(status_code=303, headers={"Location": "/admin/external-contacts"})
+
+    try:
+        ex_ids = await list_external_userids(uid)
+    except Exception as e:
+        logger.warning("sync external contacts failed list: %s", e)
+        return Response(status_code=303, headers={"Location": "/admin/external-contacts"})
+
+    for exid in ex_ids:
+        try:
+            detail = await get_external_contact(exid)
+        except Exception as e:
+            logger.warning("sync external contact failed get %s: %s", exid, e)
+            continue
+        contact = detail.get("external_contact") or {}
+        follow = (detail.get("follow_user") or [{}])[0] or {}
+        name = str(contact.get("name") or "")
+        remark = str(follow.get("remark") or "")
+        hint = _guess_uid_from_text(remark, name)
+
+        row = db.query(ExternalContact).filter(ExternalContact.external_userid == exid).one_or_none()
+        if row is None:
+            row = ExternalContact(external_userid=exid)
+            db.add(row)
+        row.name = name
+        row.follow_userid = uid
+        row.remark = remark
+        row.student_uid_hint = hint
+        row.updated_at = datetime.utcnow()
+
+        # 自动绑定 external_userid -> student_uid（若 hint 命中学生名录）
+        if hint and db.query(StudentRecord).filter(StudentRecord.student_uid == hint).one_or_none():
+            bind = db.query(ParentStudentBinding).filter(ParentStudentBinding.external_userid == exid).one_or_none()
+            if bind is None:
+                bind = db.query(ParentStudentBinding).filter(ParentStudentBinding.student_uid == hint).order_by(ParentStudentBinding.id.asc()).first()
+            if bind is None:
+                bind = ParentStudentBinding(openid="", student_uid=hint, external_userid=exid)
+                db.add(bind)
+            else:
+                bind.student_uid = hint
+                bind.external_userid = exid
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/external-contacts"})
+
+
+@app.post("/admin/external-contacts/link")
+async def admin_external_contacts_link(
+    external_userid: str = Form(...),
+    student_uid: str = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    exid = external_userid.strip()
+    su = student_uid.strip()
+    if not exid:
+        return Response(status_code=303, headers={"Location": "/admin/external-contacts"})
+
+    row = db.query(ExternalContact).filter(ExternalContact.external_userid == exid).one_or_none()
+    if row:
+        row.student_uid_hint = su
+        row.updated_at = datetime.utcnow()
+
+    if su and db.query(StudentRecord).filter(StudentRecord.student_uid == su).one_or_none():
+        bind = db.query(ParentStudentBinding).filter(ParentStudentBinding.external_userid == exid).one_or_none()
+        if bind is None:
+            bind = db.query(ParentStudentBinding).filter(ParentStudentBinding.student_uid == su).order_by(ParentStudentBinding.id.asc()).first()
+        if bind is None:
+            bind = ParentStudentBinding(openid="", student_uid=su, external_userid=exid)
+            db.add(bind)
+        else:
+            bind.student_uid = su
+            bind.external_userid = exid
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/external-contacts"})
 
 
 @app.post("/admin/reports/send-now")

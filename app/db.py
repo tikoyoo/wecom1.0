@@ -153,6 +153,21 @@ class ExternalSendLog(Base):
     error: Mapped[str] = mapped_column(Text, default="")
 
 
+class ExternalContact(Base):
+    """企业微信外部联系人快照（用于 external_userid 自动匹配 student_uid）。"""
+
+    __tablename__ = "external_contacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    external_userid: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(256), default="")
+    follow_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
+    remark: Mapped[str] = mapped_column(String(256), default="")
+    student_uid_hint: Mapped[str] = mapped_column(String(128), default="", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _sqlite_migrate_compat()
