@@ -20,10 +20,12 @@ from .db import (
     Document,
     ParentStudentBinding,
     StudentRecord,
+    StudentWeeklyMetric,
     User,
     get_db,
     init_db,
 )
+from .hydro_service import get_weekly_students
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
 from .wecom_api import send_text
@@ -153,6 +155,50 @@ def _norm_student_name(name: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
+def _latest_week_key(db: Session) -> str:
+    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
+    return latest[0] if latest else ""
+
+
+def _sync_student_records_from_weekly(
+    db: Session,
+    *,
+    week_key: str = "",
+    force_refresh: bool = False,
+) -> dict[str, object]:
+    refresh_error = ""
+    if force_refresh:
+        try:
+            get_weekly_students(db, force_refresh=True)
+        except Exception as e:
+            refresh_error = str(e)
+
+    wk = week_key.strip() or _latest_week_key(db)
+    if not wk:
+        return {"week_key": "", "updated": 0, "created": 0, "refresh_error": refresh_error}
+
+    rows = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == wk).all()
+    created = 0
+    updated = 0
+    for m in rows:
+        uid = (m.student_uid or "").strip()
+        name = (m.name or "").strip()
+        nk = _norm_student_name(name)
+        if not uid or not nk:
+            continue
+        ex = db.query(StudentRecord).filter(StudentRecord.student_uid == uid).one_or_none()
+        if ex:
+            if ex.display_name != name or ex.name_key != nk:
+                ex.display_name = name
+                ex.name_key = nk
+                updated += 1
+        else:
+            db.add(StudentRecord(student_uid=uid, display_name=name, name_key=nk))
+            created += 1
+    db.commit()
+    return {"week_key": wk, "updated": updated, "created": created, "refresh_error": refresh_error}
+
+
 class WxLoginIn(BaseModel):
     code: str = Field(min_length=1)
 
@@ -236,6 +282,10 @@ async def api_bind_by_student_name(body: BindByStudentNameIn, db: Session = Depe
         return {"status": "approved", "student_uid": existing.student_uid}
 
     matches = db.query(StudentRecord).filter(StudentRecord.name_key == key).all()
+    if not matches:
+        # 名录为空/过期时，优先尝试从最近周数据自动回填一次
+        _sync_student_records_from_weekly(db, force_refresh=False)
+        matches = db.query(StudentRecord).filter(StudentRecord.name_key == key).all()
     if not matches:
         return {"status": "not_found"}
 
@@ -458,6 +508,8 @@ async def admin_push_post(
 @app.get("/admin/students", response_class=HTMLResponse)
 async def admin_students(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
     students = db.query(StudentRecord).order_by(StudentRecord.id.desc()).limit(500).all()
+    latest_week = _latest_week_key(db)
+    weekly_count = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == latest_week).count() if latest_week else 0
     rows = "".join(
         f"<tr><td>{s.id}</td><td><code>{html.escape(s.student_uid)}</code></td>"
         f"<td>{html.escape(s.display_name)}</td><td><code>{html.escape(s.name_key)}</code></td>"
@@ -468,6 +520,22 @@ async def admin_students(db: Session = Depends(get_db), _user: str = Depends(req
     <h2>学生名录</h2>
     <p>小程序家长发送<strong>孩子姓名</strong>时，会与这里的<strong>规范化姓名</strong>（去空白）做<strong>精确匹配</strong>。
     多条同名会进入「待审核绑定」。</p>
+    <div class="card">
+      <div style="margin-bottom:10px">
+        最新周数据：<code>{html.escape(latest_week or "无")}</code>，
+        该周学生记录：<code>{weekly_count}</code>
+      </div>
+      <form action="/admin/students/sync-weekly" method="post">
+        <div style="margin-bottom:10px">
+          <label>week_key（可选，留空=最新）</label>
+          <input name="week_key" placeholder="例如 2026-W12" />
+        </div>
+        <div style="margin-bottom:10px">
+          <label><input type="checkbox" name="force_refresh" value="1" /> 先从 Hydro 拉取最新周数据（需配置 HYDRO_SSH_*）</label>
+        </div>
+        <button type="submit">从周数据同步到学生名录</button>
+      </form>
+    </div>
     <div class="card">
       <form action="/admin/students/add" method="post">
         <div style="margin-bottom:10px">
@@ -512,6 +580,30 @@ async def admin_students_add(
         db.add(StudentRecord(student_uid=uid, display_name=dn, name_key=nk))
     db.commit()
     return Response(status_code=303, headers={"Location": "/admin/students"})
+
+
+@app.post("/admin/students/sync-weekly")
+async def admin_students_sync_weekly(
+    week_key: str = Form(""),
+    force_refresh: str = Form(""),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    result = _sync_student_records_from_weekly(
+        db,
+        week_key=week_key,
+        force_refresh=(force_refresh or "").strip() == "1",
+    )
+    wk = result.get("week_key") or "无"
+    created = int(result.get("created") or 0)
+    updated = int(result.get("updated") or 0)
+    err = str(result.get("refresh_error") or "").strip()
+    if err:
+        logger.warning("sync weekly with refresh error: %s", err)
+    tip = f"week={wk}, created={created}, updated={updated}"
+    if err:
+        tip = f"{tip}, refresh_error={err[:120]}"
+    return Response(status_code=303, headers={"Location": f"/admin/students?sync={tip}"})
 
 
 @app.get("/admin/binding-requests", response_class=HTMLResponse)

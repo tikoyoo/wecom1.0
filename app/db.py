@@ -101,6 +101,38 @@ class BindingNameRequest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class HydroCache(Base):
+    """Hydro 周数据缓存（按 key 存储，当前使用 __ALL__）。"""
+
+    __tablename__ = "hydro_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_uid: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="[]")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class StudentWeeklyMetric(Base):
+    """学生每周5维数据（从 Hydro 拉取并落库）。"""
+
+    __tablename__ = "student_weekly_metrics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_key: Mapped[str] = mapped_column(String(32), index=True)  # 例如 2026-W12
+    student_uid: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(256), default="")
+    rank: Mapped[int] = mapped_column(Integer, default=999)
+    groups_json: Mapped[str] = mapped_column(Text, default="[]")
+    hw_title: Mapped[str] = mapped_column(Text, default="")
+    hw_done: Mapped[int] = mapped_column(Integer, default=0)
+    hw_total: Mapped[int] = mapped_column(Integer, default=0)
+    week_submits: Mapped[int] = mapped_column(Integer, default=0)
+    week_ac: Mapped[int] = mapped_column(Integer, default=0)
+    active_days: Mapped[int] = mapped_column(Integer, default=0)
+    last_active: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 

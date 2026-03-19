@@ -53,8 +53,22 @@ class Settings(BaseSettings):
     # 微信小程序（code2Session，用于小程序 openid）
     wx_mini_appid: str = ""
     wx_mini_secret: str = ""
+    
+    # Hydro 周数据拉取（用于家长姓名匹配基础数据）
+    hydro_ssh_host: str = ""
+    hydro_ssh_user: str = ""
+    hydro_ssh_key_path: str = ""
+    wecom_external_sender_id: str = ""
 
-    @field_validator("wx_mini_appid", "wx_mini_secret", mode="before")
+    @field_validator(
+        "wx_mini_appid",
+        "wx_mini_secret",
+        "hydro_ssh_host",
+        "hydro_ssh_user",
+        "hydro_ssh_key_path",
+        "wecom_external_sender_id",
+        mode="before",
+    )
     @classmethod
     def _strip_mini_secrets(cls, v: object) -> str:
         if v is None:
