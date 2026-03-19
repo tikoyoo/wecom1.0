@@ -450,8 +450,8 @@ def _looks_like_operator_command(cmd: str) -> bool:
     s = (cmd or "").strip()
     if not s:
         return False
-    # 强约束：仅 #s 开头视为运维指令（例如：#s 统计今天CSP-J4班做题数据）
-    return bool(re.match(r"^\s*[#＃]s(\s+|$)", s, flags=re.IGNORECASE))
+    # 强约束：仅 #s 开头视为运维指令（支持 "#s统计..." 和 "#s 统计..."）
+    return bool(re.match(r"^\s*[#＃]s", s, flags=re.IGNORECASE))
 
 
 async def _weekly_scheduler_loop() -> None:
