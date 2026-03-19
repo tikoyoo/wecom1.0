@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     hydro_ssh_user: str = ""
     hydro_ssh_key_path: str = ""
     wecom_external_sender_id: str = ""
+    wecom_weekly_operator_ids: str = "yangshengpin"
+    weekly_report_default_time: str = "07:30"
 
     @field_validator(
         "wx_mini_appid",

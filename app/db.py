@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from .config import settings
@@ -84,6 +84,7 @@ class ParentStudentBinding(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     openid: Mapped[str] = mapped_column(String(128), index=True)
     student_uid: Mapped[str] = mapped_column(String(128), index=True)
+    external_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -133,8 +134,43 @@ class StudentWeeklyMetric(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ExternalSendLog(Base):
+    """周报发送日志（外部联系人消息模板发送结果）。"""
+
+    __tablename__ = "external_send_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    week_key: Mapped[str] = mapped_column(String(32), default="", index=True)
+    sender_userid: Mapped[str] = mapped_column(String(128), default="")
+    group_filter: Mapped[str] = mapped_column(String(128), default="")
+    only_unfinished: Mapped[int] = mapped_column(Integer, default=0)
+    student_uid: Mapped[str] = mapped_column(String(128), default="", index=True)
+    external_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
+    status: Mapped[str] = mapped_column(String(16), default="ok")  # ok/fail/skip
+    msgid: Mapped[str] = mapped_column(String(128), default="")
+    response_json: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    _sqlite_migrate_compat()
+
+
+def _sqlite_migrate_compat() -> None:
+    """兼容旧库：补齐新增列，避免线上升级时报 no such column / not null 错误。"""
+    with engine.begin() as conn:
+        # parent_student_bindings 可能是旧结构（含 parent_id，缺 openid/external_userid）
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(parent_student_bindings)")).fetchall()]
+        if "openid" not in cols:
+            conn.execute(text("ALTER TABLE parent_student_bindings ADD COLUMN openid VARCHAR(128)"))
+        if "student_uid" not in cols:
+            conn.execute(text("ALTER TABLE parent_student_bindings ADD COLUMN student_uid VARCHAR(128)"))
+        if "external_userid" not in cols:
+            conn.execute(text("ALTER TABLE parent_student_bindings ADD COLUMN external_userid VARCHAR(128) DEFAULT ''"))
+        if "created_at" not in cols:
+            conn.execute(text("ALTER TABLE parent_student_bindings ADD COLUMN created_at DATETIME"))
 
 
 def get_db():

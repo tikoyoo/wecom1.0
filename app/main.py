@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -19,6 +21,7 @@ from .db import (
     BindingNameRequest,
     ChatMessage,
     Document,
+    ExternalSendLog,
     ParentStudentBinding,
     StudentRecord,
     StudentWeeklyMetric,
@@ -29,6 +32,7 @@ from .db import (
 from .hydro_service import get_weekly_students
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
+from .reports_service import send_weekly_reports
 from .wecom_api import send_text
 from .wecom_crypto import WeComCrypto
 from .wecom_xml import (
@@ -44,6 +48,7 @@ logger = logging.getLogger("wecom-bot")
 crypto: WeComCrypto | None = None
 
 rindex: RagIndex | None = None
+weekly_scheduler_task: asyncio.Task | None = None
 
 
 def _rebuild_index(db: Session) -> None:
@@ -127,7 +132,15 @@ async def lifespan(app: FastAPI):
             encoding_aes_key=settings.wecom_encoding_aes_key,
             corp_id=settings.wecom_corp_id,
         )
+    global weekly_scheduler_task
+    weekly_scheduler_task = asyncio.create_task(_weekly_scheduler_loop())
     yield
+    if weekly_scheduler_task:
+        weekly_scheduler_task.cancel()
+        try:
+            await weekly_scheduler_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="WeCom KB Bot", version="0.1.0", lifespan=lifespan)
@@ -165,6 +178,90 @@ def _weekly_updates_dir() -> Path:
     p = Path(settings.data_dir) / "weekly_student_updates"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _weekly_schedule_file() -> Path:
+    p = Path(settings.data_dir) / "weekly_report_schedule.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _load_weekly_schedule() -> dict[str, object]:
+    fp = _weekly_schedule_file()
+    if not fp.exists():
+        return {
+            "enabled": False,
+            "time_hhmm": settings.weekly_report_default_time or "07:30",
+            "group": "",
+            "only_unfinished": False,
+            "last_run_date": "",
+        }
+    try:
+        data = json.loads(fp.read_text(encoding="utf-8"))
+        return {
+            "enabled": bool(data.get("enabled", False)),
+            "time_hhmm": str(data.get("time_hhmm") or settings.weekly_report_default_time or "07:30"),
+            "group": str(data.get("group") or ""),
+            "only_unfinished": bool(data.get("only_unfinished", False)),
+            "last_run_date": str(data.get("last_run_date") or ""),
+        }
+    except Exception:
+        return {
+            "enabled": False,
+            "time_hhmm": settings.weekly_report_default_time or "07:30",
+            "group": "",
+            "only_unfinished": False,
+            "last_run_date": "",
+        }
+
+
+def _save_weekly_schedule(data: dict[str, object]) -> None:
+    fp = _weekly_schedule_file()
+    fp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _parse_op_ids() -> set[str]:
+    raw = (settings.wecom_weekly_operator_ids or "").strip()
+    if not raw:
+        return set()
+    return {x.strip() for x in re.split(r"[,\s|]+", raw) if x.strip()}
+
+
+async def _weekly_scheduler_loop() -> None:
+    while True:
+        try:
+            sch = _load_weekly_schedule()
+            if not sch.get("enabled"):
+                await asyncio.sleep(15)
+                continue
+            hhmm = str(sch.get("time_hhmm") or "07:30")
+            now = datetime.now()
+            now_hhmm = now.strftime("%H:%M")
+            today = now.strftime("%Y-%m-%d")
+            if now_hhmm == hhmm and str(sch.get("last_run_date") or "") != today:
+                with next(get_db()) as db:  # type: ignore[arg-type]
+                    res = await send_weekly_reports(
+                        db,
+                        group=str(sch.get("group") or ""),
+                        only_unfinished=bool(sch.get("only_unfinished", False)),
+                        force_refresh=True,
+                    )
+                    logger.info(
+                        "weekly scheduler sent: week=%s group=%s ok=%s fail=%s skip=%s",
+                        res.week_key,
+                        res.group,
+                        res.ok,
+                        res.fail,
+                        res.skip,
+                    )
+                sch["last_run_date"] = today
+                _save_weekly_schedule(sch)
+            await asyncio.sleep(20)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("weekly scheduler loop error")
+            await asyncio.sleep(30)
 
 
 def _dump_weekly_snapshot_file(db: Session, week_key: str) -> dict[str, object]:
@@ -263,6 +360,74 @@ class ChatIn(BaseModel):
     openid: str = Field(min_length=1)
     student_uid: str = Field(min_length=1)
     message: str = Field(min_length=1)
+
+
+async def _handle_weekly_command(db: Session, operator_id: str, text: str) -> str | None:
+    ops = _parse_op_ids()
+    if not ops or operator_id not in ops:
+        return None
+
+    cmd = (text or "").strip()
+    if not cmd.startswith("周报"):
+        return None
+
+    if cmd in ("周报", "周报 帮助", "周报 help"):
+        return (
+            "周报指令：\n"
+            "1) 周报 状态\n"
+            "2) 周报 发送 [班级=xxx]\n"
+            "3) 周报 开启 07:30 [班级=xxx]\n"
+            "4) 周报 时间 07:30\n"
+            "5) 周报 关闭"
+        )
+
+    if cmd.startswith("周报 状态"):
+        sch = _load_weekly_schedule()
+        return (
+            f"周报定时：{'开启' if sch.get('enabled') else '关闭'}\n"
+            f"时间：{sch.get('time_hhmm')}\n"
+            f"班级过滤：{sch.get('group') or '无（全量）'}\n"
+            f"仅未完成：{'是' if sch.get('only_unfinished') else '否'}\n"
+            f"最近执行日期：{sch.get('last_run_date') or '无'}"
+        )
+
+    if cmd.startswith("周报 时间"):
+        m = re.search(r"(\d{1,2}:\d{2})", cmd)
+        if not m:
+            return "格式错误，示例：周报 时间 07:30"
+        hhmm = m.group(1)
+        sch = _load_weekly_schedule()
+        sch["time_hhmm"] = hhmm
+        _save_weekly_schedule(sch)
+        return f"已更新周报时间：{hhmm}"
+
+    if cmd.startswith("周报 开启"):
+        m = re.search(r"(\d{1,2}:\d{2})", cmd)
+        g = re.search(r"班级\s*=\s*([^\s]+)", cmd)
+        sch = _load_weekly_schedule()
+        if m:
+            sch["time_hhmm"] = m.group(1)
+        sch["enabled"] = True
+        sch["group"] = g.group(1) if g else ""
+        _save_weekly_schedule(sch)
+        return f"周报定时已开启：{sch.get('time_hhmm')}，班级={sch.get('group') or '全量'}"
+
+    if cmd.startswith("周报 关闭"):
+        sch = _load_weekly_schedule()
+        sch["enabled"] = False
+        _save_weekly_schedule(sch)
+        return "周报定时已关闭"
+
+    if cmd.startswith("周报 发送"):
+        g = re.search(r"班级\s*=\s*([^\s]+)", cmd)
+        group = g.group(1) if g else ""
+        try:
+            res = await send_weekly_reports(db, group=group, force_refresh=True)
+            return f"已执行周报发送：week={res.week_key} group={res.group or '全量'} ok={res.ok} fail={res.fail} skip={res.skip}"
+        except Exception as e:
+            return f"周报发送失败：{e}"
+
+    return "未识别指令。发送“周报 帮助”查看用法。"
 
 
 @app.post("/api/wx-login")
@@ -406,7 +571,12 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
     if msg.msg_type != "text" or not msg.content.strip():
         reply_text = "目前只支持文本咨询。请发送文字问题。"
     else:
-        reply_text = await answer_with_rag_and_memory(db, msg.from_user_name, msg.content.strip())
+        txt = msg.content.strip()
+        cmd_reply = await _handle_weekly_command(db, msg.from_user_name, txt)
+        if cmd_reply is not None:
+            reply_text = cmd_reply
+        else:
+            reply_text = await answer_with_rag_and_memory(db, msg.from_user_name, txt)
 
     plain_reply = build_plain_text_reply(to_user=msg.from_user_name, from_user=msg.to_user_name, content=reply_text)
     encrypt, signature, ts = crypto.encrypt(plain_reply, nonce=nonce, timestamp=timestamp)
@@ -424,6 +594,7 @@ async def admin_home(_user: str = Depends(require_admin)):
     <div class="card">
       <div><a href="/admin/docs">知识库管理</a></div>
       <div><a href="/admin/chats">会话记录</a></div>
+      <div><a href="/admin/reports">周报发送</a></div>
       <div><a href="/admin/students">学生名录（小程序姓名匹配）</a></div>
       <div><a href="/admin/bindings">已匹配成功（家长绑定）</a></div>
       <div><a href="/admin/weekly-files">每周学生更新数据文件</a></div>
@@ -555,6 +726,89 @@ async def admin_push_post(
     return Response(status_code=303, headers={"Location": "/admin/push"})
 
 
+@app.get("/admin/reports", response_class=HTMLResponse)
+async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    sch = _load_weekly_schedule()
+    logs = db.query(ExternalSendLog).order_by(ExternalSendLog.id.desc()).limit(50).all()
+    rows = "".join(
+        f"<tr><td>{l.created_at}</td><td>{html.escape(l.week_key)}</td><td>{html.escape(l.group_filter or '全量')}</td>"
+        f"<td><code>{html.escape(l.student_uid)}</code></td><td><code>{html.escape(l.external_userid)}</code></td>"
+        f"<td>{html.escape(l.status)}</td><td>{html.escape((l.error or '')[:120])}</td></tr>"
+        for l in logs
+    )
+    body = f"""
+    <h2>周报发送</h2>
+    <div class="card">
+      <div><strong>定时状态：</strong>{'开启' if sch.get('enabled') else '关闭'}</div>
+      <div><strong>发送时间：</strong>{html.escape(str(sch.get('time_hhmm') or '07:30'))}</div>
+      <div><strong>班级过滤：</strong>{html.escape(str(sch.get('group') or '无（全量）'))}</div>
+      <div><strong>最近执行日期：</strong>{html.escape(str(sch.get('last_run_date') or '无'))}</div>
+    </div>
+    <div class="card">
+      <form action="/admin/reports/send-now" method="post">
+        <div style="margin-bottom:10px"><label>班级（可选，留空=全量）</label><input name="group" placeholder="例如 高一1班" /></div>
+        <div style="margin-bottom:10px"><label><input type="checkbox" name="only_unfinished" value="1" /> 仅发送作业未完成学生</label></div>
+        <button type="submit">立即发送周报</button>
+      </form>
+    </div>
+    <div class="card">
+      <form action="/admin/reports/schedule" method="post">
+        <div style="margin-bottom:10px"><label><input type="checkbox" name="enabled" value="1" {'checked' if sch.get('enabled') else ''}/> 开启定时发送</label></div>
+        <div style="margin-bottom:10px"><label>时间（HH:MM）</label><input name="time_hhmm" value="{html.escape(str(sch.get('time_hhmm') or '07:30'))}" /></div>
+        <div style="margin-bottom:10px"><label>默认班级（可选）</label><input name="group" value="{html.escape(str(sch.get('group') or ''), quote=True)}" /></div>
+        <div style="margin-bottom:10px"><label><input type="checkbox" name="only_unfinished" value="1" {'checked' if sch.get('only_unfinished') else ''}/> 默认仅未完成</label></div>
+        <button type="submit">保存定时配置</button>
+      </form>
+    </div>
+    <div class="card">
+      <h3>最近发送日志（50条）</h3>
+      <table>
+        <thead><tr><th>时间</th><th>周</th><th>班级</th><th>student_uid</th><th>external_userid</th><th>状态</th><th>错误</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Reports", body)
+
+
+@app.post("/admin/reports/send-now")
+async def admin_reports_send_now(
+    group: str = Form(""),
+    only_unfinished: str = Form(""),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    res = await send_weekly_reports(
+        db,
+        group=group.strip(),
+        only_unfinished=(only_unfinished or "").strip() == "1",
+        force_refresh=True,
+    )
+    logger.info("admin send now: week=%s group=%s ok=%s fail=%s skip=%s", res.week_key, res.group, res.ok, res.fail, res.skip)
+    return Response(status_code=303, headers={"Location": "/admin/reports"})
+
+
+@app.post("/admin/reports/schedule")
+async def admin_reports_schedule(
+    enabled: str = Form(""),
+    time_hhmm: str = Form("07:30"),
+    group: str = Form(""),
+    only_unfinished: str = Form(""),
+    _user: str = Depends(require_admin),
+):
+    hhmm = (time_hhmm or "07:30").strip()
+    if not re.fullmatch(r"\d{1,2}:\d{2}", hhmm):
+        hhmm = "07:30"
+    sch = _load_weekly_schedule()
+    sch["enabled"] = (enabled or "").strip() == "1"
+    sch["time_hhmm"] = hhmm
+    sch["group"] = group.strip()
+    sch["only_unfinished"] = (only_unfinished or "").strip() == "1"
+    _save_weekly_schedule(sch)
+    return Response(status_code=303, headers={"Location": "/admin/reports"})
+
+
 @app.get("/admin/weekly-files", response_class=HTMLResponse)
 async def admin_weekly_files(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
     latest_week = _latest_week_key(db)
@@ -619,13 +873,15 @@ async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(req
             f"<tr><td>{b.id}</td>"
             f"<td><code>{html.escape(b.openid)}</code></td>"
             f"<td><code>{html.escape(b.student_uid)}</code></td>"
+            f"<td><code>{html.escape(b.external_userid or '')}</code></td>"
             f"<td>{html.escape(stu_map.get(b.student_uid, ''))}</td>"
             f"<td>{b.created_at}</td>"
             f"<td>"
             f"<form action='/admin/bindings/update' method='post' style='display:flex;gap:6px;align-items:center'>"
             f"<input type='hidden' name='binding_id' value='{b.id}' />"
             f"<input name='student_uid' value='{html.escape(b.student_uid, quote=True)}' style='width:120px' />"
-            f"<button type='submit'>改UID</button>"
+            f"<input name='external_userid' value='{html.escape((b.external_userid or ''), quote=True)}' style='width:150px' placeholder='外部联系人ID' />"
+            f"<button type='submit'>保存</button>"
             f"</form>"
             f"<form action='/admin/bindings/delete' method='post' style='margin-top:6px'>"
             f"<input type='hidden' name='binding_id' value='{b.id}' />"
@@ -640,7 +896,7 @@ async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(req
     <p>显示最近 500 条 openid 与 student_uid 的绑定结果。</p>
     <div class="card">
       <table>
-        <thead><tr><th>ID</th><th>openid</th><th>student_uid</th><th>学生姓名</th><th>绑定时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>ID</th><th>openid</th><th>student_uid</th><th>external_userid</th><th>学生姓名</th><th>绑定时间</th><th>操作</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
@@ -653,6 +909,7 @@ async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(req
 async def admin_bindings_update(
     binding_id: int = Form(...),
     student_uid: str = Form(...),
+    external_userid: str = Form(""),
     db: Session = Depends(get_db),
     _user: str = Depends(require_admin),
 ):
@@ -663,6 +920,7 @@ async def admin_bindings_update(
     if not su:
         return Response(status_code=303, headers={"Location": "/admin/bindings"})
     b.student_uid = su
+    b.external_userid = external_userid.strip()
     db.commit()
     return Response(status_code=303, headers={"Location": "/admin/bindings"})
 
