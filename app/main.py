@@ -621,7 +621,18 @@ async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(req
             f"<td><code>{html.escape(b.openid)}</code></td>"
             f"<td><code>{html.escape(b.student_uid)}</code></td>"
             f"<td>{html.escape(stu_map.get(b.student_uid, ''))}</td>"
-            f"<td>{b.created_at}</td></tr>"
+            f"<td>{b.created_at}</td>"
+            f"<td>"
+            f"<form action='/admin/bindings/update' method='post' style='display:flex;gap:6px;align-items:center'>"
+            f"<input type='hidden' name='binding_id' value='{b.id}' />"
+            f"<input name='student_uid' value='{html.escape(b.student_uid, quote=True)}' style='width:120px' />"
+            f"<button type='submit'>改UID</button>"
+            f"</form>"
+            f"<form action='/admin/bindings/delete' method='post' style='margin-top:6px'>"
+            f"<input type='hidden' name='binding_id' value='{b.id}' />"
+            f"<button type='submit' class='secondary'>删除绑定</button>"
+            f"</form>"
+            f"</td></tr>"
         )
         for b in binds
     )
@@ -630,13 +641,44 @@ async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(req
     <p>显示最近 500 条 openid 与 student_uid 的绑定结果。</p>
     <div class="card">
       <table>
-        <thead><tr><th>ID</th><th>openid</th><th>student_uid</th><th>学生姓名</th><th>绑定时间</th></tr></thead>
+        <thead><tr><th>ID</th><th>openid</th><th>student_uid</th><th>学生姓名</th><th>绑定时间</th><th>操作</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
     <div><a href="/admin/">返回</a></div>
     """
     return html_page("Bindings", body)
+
+
+@app.post("/admin/bindings/update")
+async def admin_bindings_update(
+    binding_id: int = Form(...),
+    student_uid: str = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    b = db.query(ParentStudentBinding).filter(ParentStudentBinding.id == binding_id).one_or_none()
+    if not b:
+        return Response(status_code=303, headers={"Location": "/admin/bindings"})
+    su = student_uid.strip()
+    if not su:
+        return Response(status_code=303, headers={"Location": "/admin/bindings"})
+    b.student_uid = su
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/bindings"})
+
+
+@app.post("/admin/bindings/delete")
+async def admin_bindings_delete(
+    binding_id: int = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    b = db.query(ParentStudentBinding).filter(ParentStudentBinding.id == binding_id).one_or_none()
+    if b:
+        db.delete(b)
+        db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/bindings"})
 
 
 @app.post("/admin/weekly-files/generate")
@@ -677,9 +719,23 @@ async def admin_students(db: Session = Depends(get_db), _user: str = Depends(req
     latest_week = _latest_week_key(db)
     weekly_count = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == latest_week).count() if latest_week else 0
     rows = "".join(
-        f"<tr><td>{s.id}</td><td><code>{html.escape(s.student_uid)}</code></td>"
-        f"<td>{html.escape(s.display_name)}</td><td><code>{html.escape(s.name_key)}</code></td>"
-        f"<td>{s.created_at}</td></tr>"
+        (
+            f"<tr><td>{s.id}</td><td><code>{html.escape(s.student_uid)}</code></td>"
+            f"<td>{html.escape(s.display_name)}</td><td><code>{html.escape(s.name_key)}</code></td>"
+            f"<td>{s.created_at}</td>"
+            f"<td>"
+            f"<form action='/admin/students/update' method='post' style='display:flex;gap:6px;align-items:center'>"
+            f"<input type='hidden' name='record_id' value='{s.id}' />"
+            f"<input name='student_uid' value='{html.escape(s.student_uid, quote=True)}' style='width:120px' />"
+            f"<input name='display_name' value='{html.escape(s.display_name, quote=True)}' style='width:120px' />"
+            f"<button type='submit'>修改</button>"
+            f"</form>"
+            f"<form action='/admin/students/delete' method='post' style='margin-top:6px'>"
+            f"<input type='hidden' name='record_id' value='{s.id}' />"
+            f"<button type='submit' class='secondary'>删除</button>"
+            f"</form>"
+            f"</td></tr>"
+        )
         for s in students
     )
     body = f"""
@@ -717,7 +773,7 @@ async def admin_students(db: Session = Depends(get_db), _user: str = Depends(req
     </div>
     <div class="card">
       <table>
-        <thead><tr><th>ID</th><th>student_uid</th><th>姓名</th><th>name_key</th><th>时间</th></tr></thead>
+        <thead><tr><th>ID</th><th>student_uid</th><th>姓名</th><th>name_key</th><th>时间</th><th>操作</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
@@ -745,6 +801,51 @@ async def admin_students_add(
     else:
         db.add(StudentRecord(student_uid=uid, display_name=dn, name_key=nk))
     db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/students"})
+
+
+@app.post("/admin/students/update")
+async def admin_students_update(
+    record_id: int = Form(...),
+    student_uid: str = Form(...),
+    display_name: str = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    row = db.query(StudentRecord).filter(StudentRecord.id == record_id).one_or_none()
+    if not row:
+        return Response(status_code=303, headers={"Location": "/admin/students"})
+    uid = student_uid.strip()
+    dn = display_name.strip()
+    nk = _norm_student_name(dn)
+    if not uid or not nk:
+        return Response(status_code=303, headers={"Location": "/admin/students"})
+    dup = db.query(StudentRecord).filter(StudentRecord.student_uid == uid, StudentRecord.id != record_id).one_or_none()
+    if dup:
+        return Response(status_code=303, headers={"Location": "/admin/students"})
+    old_uid = row.student_uid
+    row.student_uid = uid
+    row.display_name = dn
+    row.name_key = nk
+    if old_uid != uid:
+        binds = db.query(ParentStudentBinding).filter(ParentStudentBinding.student_uid == old_uid).all()
+        for b in binds:
+            b.student_uid = uid
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/students"})
+
+
+@app.post("/admin/students/delete")
+async def admin_students_delete(
+    record_id: int = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    row = db.query(StudentRecord).filter(StudentRecord.id == record_id).one_or_none()
+    if row:
+        db.query(ParentStudentBinding).filter(ParentStudentBinding.student_uid == row.student_uid).delete()
+        db.delete(row)
+        db.commit()
     return Response(status_code=303, headers={"Location": "/admin/students"})
 
 

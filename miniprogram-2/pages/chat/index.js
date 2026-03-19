@@ -5,6 +5,12 @@ function formatReqError(err) {
   return '网络异常';
 }
 
+function isLikelyStudentName(text) {
+  const v = String(text || '').trim();
+  // 仅允许常见中文姓名字符，绑定前避免误把聊天内容当姓名请求
+  return /^[\u4e00-\u9fa5·]{2,8}$/.test(v);
+}
+
 Page({
   /** 页面的初始数据 */
   data: {
@@ -228,6 +234,11 @@ Page({
 
     try {
       if (phase !== 'chatting' || !student_uid) {
+        if (!isLikelyStudentName(content)) {
+          this._pushBot('绑定完成前仅支持发送孩子姓名（2-8个中文字符），暂不提供聊天回复。');
+          wx.nextTick(this.scrollToBottom);
+          return;
+        }
         const r = await this._req('/api/bind-by-student-name', 'POST', {
           openid: oid,
           student_name: content,
