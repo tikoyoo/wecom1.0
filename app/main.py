@@ -5,10 +5,11 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -160,6 +161,46 @@ def _latest_week_key(db: Session) -> str:
     return latest[0] if latest else ""
 
 
+def _weekly_updates_dir() -> Path:
+    p = Path(settings.data_dir) / "weekly_student_updates"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _dump_weekly_snapshot_file(db: Session, week_key: str) -> dict[str, object]:
+    wk = (week_key or "").strip()
+    if not wk:
+        return {"week_key": "", "rows": 0, "filename": ""}
+    rows = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == wk).all()
+    payload: list[dict[str, object]] = []
+    for r in rows:
+        try:
+            groups = json.loads(r.groups_json or "[]")
+        except json.JSONDecodeError:
+            groups = []
+        payload.append(
+            {
+                "week_key": r.week_key,
+                "student_uid": r.student_uid,
+                "name": r.name,
+                "rank": r.rank,
+                "groups": groups,
+                "hw_title": r.hw_title,
+                "hw_done": r.hw_done,
+                "hw_total": r.hw_total,
+                "week_submits": r.week_submits,
+                "week_ac": r.week_ac,
+                "active_days": r.active_days,
+                "last_active": r.last_active,
+                "updated_at": str(r.updated_at),
+            }
+        )
+    name = f"{wk}.json"
+    out = _weekly_updates_dir() / name
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"week_key": wk, "rows": len(payload), "filename": name}
+
+
 def _sync_student_records_from_weekly(
     db: Session,
     *,
@@ -196,7 +237,15 @@ def _sync_student_records_from_weekly(
             db.add(StudentRecord(student_uid=uid, display_name=name, name_key=nk))
             created += 1
     db.commit()
-    return {"week_key": wk, "updated": updated, "created": created, "refresh_error": refresh_error}
+    snap = _dump_weekly_snapshot_file(db, wk)
+    return {
+        "week_key": wk,
+        "updated": updated,
+        "created": created,
+        "refresh_error": refresh_error,
+        "snapshot_file": snap.get("filename", ""),
+        "snapshot_rows": snap.get("rows", 0),
+    }
 
 
 class WxLoginIn(BaseModel):
@@ -377,6 +426,7 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/docs">知识库管理</a></div>
       <div><a href="/admin/chats">会话记录</a></div>
       <div><a href="/admin/students">学生名录（小程序姓名匹配）</a></div>
+      <div><a href="/admin/weekly-files">每周学生更新数据文件</a></div>
       <div><a href="/admin/binding-requests">待审核绑定</a></div>
       <div><a href="/admin/push">主动推送</a></div>
     </div>
@@ -503,6 +553,89 @@ async def admin_push_post(
 ):
     await send_text(touser=touser.strip(), content=content.strip())
     return Response(status_code=303, headers={"Location": "/admin/push"})
+
+
+@app.get("/admin/weekly-files", response_class=HTMLResponse)
+async def admin_weekly_files(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    latest_week = _latest_week_key(db)
+    week_rows = (
+        db.query(StudentWeeklyMetric.week_key)
+        .distinct()
+        .order_by(StudentWeeklyMetric.week_key.desc())
+        .limit(30)
+        .all()
+    )
+    week_opts = "".join(f'<option value="{html.escape(w[0])}">{html.escape(w[0])}</option>' for w in week_rows if w and w[0])
+
+    files = sorted(_weekly_updates_dir().glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)
+    rows = "".join(
+        f"<tr><td><code>{html.escape(f.name)}</code></td><td>{f.stat().st_size}</td>"
+        f"<td><a href='/admin/weekly-files/download?name={html.escape(f.name, quote=True)}'>下载</a></td></tr>"
+        for f in files[:100]
+    )
+    body = f"""
+    <h2>每周学生更新数据文件</h2>
+    <p>目录：<code>{html.escape(str(_weekly_updates_dir()))}</code>。每周一个 JSON 文件（例如 <code>2026-W12.json</code>）。</p>
+    <div class="card">
+      <form action="/admin/weekly-files/generate" method="post">
+        <div style="margin-bottom:10px">
+          <label>week_key（可选，留空=最新）</label>
+          <input name="week_key" placeholder="例如 2026-W12（默认最新 {html.escape(latest_week or '无')}）" />
+        </div>
+        <div style="margin-bottom:10px">
+          <label>或从已有周选择</label>
+          <select name="week_key_select">
+            <option value="">（不选择）</option>
+            {week_opts}
+          </select>
+        </div>
+        <div style="margin-bottom:10px">
+          <label><input type="checkbox" name="force_refresh" value="1" /> 先从 Hydro 刷新周数据后再写文件</label>
+        </div>
+        <button type="submit">生成/更新该周文件</button>
+      </form>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>文件名</th><th>大小(bytes)</th><th>操作</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Weekly files", body)
+
+
+@app.post("/admin/weekly-files/generate")
+async def admin_weekly_files_generate(
+    week_key: str = Form(""),
+    week_key_select: str = Form(""),
+    force_refresh: str = Form(""),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    wk = (week_key_select or week_key or "").strip()
+    if (force_refresh or "").strip() == "1":
+        try:
+            get_weekly_students(db, force_refresh=True)
+        except Exception as e:
+            logger.warning("weekly file force refresh failed: %s", e)
+    if not wk:
+        wk = _latest_week_key(db)
+    if wk:
+        _dump_weekly_snapshot_file(db, wk)
+    return Response(status_code=303, headers={"Location": "/admin/weekly-files"})
+
+
+@app.get("/admin/weekly-files/download")
+async def admin_weekly_files_download(name: str, _user: str = Depends(require_admin)):
+    safe_name = Path(name).name
+    if not safe_name.endswith(".json"):
+        raise HTTPException(status_code=400, detail="invalid file")
+    fp = _weekly_updates_dir() / safe_name
+    if not fp.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(path=str(fp), filename=safe_name, media_type="application/json")
 
 
 @app.get("/admin/students", response_class=HTMLResponse)
