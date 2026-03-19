@@ -492,6 +492,19 @@ async def _weekly_scheduler_loop() -> None:
             await asyncio.sleep(30)
 
 
+async def _send_deferred_wecom_reply(from_user: str, text: str) -> None:
+    """Compute answer asynchronously and push via app message."""
+    try:
+        with next(get_db()) as db:  # type: ignore[arg-type]
+            reply = await answer_with_rag_and_memory(db, from_user, text)
+        if len(reply) > WECOM_REPLY_MAX_CHARS:
+            reply = reply[:WECOM_REPLY_MAX_CHARS] + "\n\n（内容较长，已截断）"
+        await send_text(touser=from_user, content=reply)
+        logger.info("deferred wecom reply sent: to=%s len=%s", from_user, len(reply))
+    except Exception:
+        logger.exception("deferred wecom reply failed: to=%s", from_user)
+
+
 def _dump_weekly_snapshot_file(db: Session, week_key: str) -> dict[str, object]:
     wk = (week_key or "").strip()
     if not wk:
@@ -920,7 +933,10 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
             if ai_cmd_reply is not None:
                 reply_text = ai_cmd_reply
             else:
-                reply_text = await answer_with_rag_and_memory(db, msg.from_user_name, txt)
+                # Always acknowledge immediately, then send full AI answer asynchronously.
+                asyncio.create_task(_send_deferred_wecom_reply(msg.from_user_name, txt))
+                reply_text = "已收到，正在整理详细回复，将稍后推送给你。"
+                logger.info("wecom immediate ack + deferred reply: from=%s", msg.from_user_name)
 
     # WeCom callback text payload has practical size limits; overlong replies may be dropped and retried.
     if len(reply_text) > WECOM_REPLY_MAX_CHARS:
