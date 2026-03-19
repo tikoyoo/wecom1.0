@@ -426,6 +426,7 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/docs">知识库管理</a></div>
       <div><a href="/admin/chats">会话记录</a></div>
       <div><a href="/admin/students">学生名录（小程序姓名匹配）</a></div>
+      <div><a href="/admin/bindings">已匹配成功（家长绑定）</a></div>
       <div><a href="/admin/weekly-files">每周学生更新数据文件</a></div>
       <div><a href="/admin/binding-requests">待审核绑定</a></div>
       <div><a href="/admin/push">主动推送</a></div>
@@ -604,6 +605,38 @@ async def admin_weekly_files(db: Session = Depends(get_db), _user: str = Depends
     <div><a href="/admin/">返回</a></div>
     """
     return html_page("Weekly files", body)
+
+
+@app.get("/admin/bindings", response_class=HTMLResponse)
+async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    binds = db.query(ParentStudentBinding).order_by(ParentStudentBinding.id.desc()).limit(500).all()
+    uids = sorted({b.student_uid for b in binds if b.student_uid})
+    stu_map: dict[str, str] = {}
+    if uids:
+        stus = db.query(StudentRecord).filter(StudentRecord.student_uid.in_(uids)).all()
+        stu_map = {s.student_uid: s.display_name for s in stus}
+    rows = "".join(
+        (
+            f"<tr><td>{b.id}</td>"
+            f"<td><code>{html.escape(b.openid)}</code></td>"
+            f"<td><code>{html.escape(b.student_uid)}</code></td>"
+            f"<td>{html.escape(stu_map.get(b.student_uid, ''))}</td>"
+            f"<td>{b.created_at}</td></tr>"
+        )
+        for b in binds
+    )
+    body = f"""
+    <h2>已匹配成功（家长绑定）</h2>
+    <p>显示最近 500 条 openid 与 student_uid 的绑定结果。</p>
+    <div class="card">
+      <table>
+        <thead><tr><th>ID</th><th>openid</th><th>student_uid</th><th>学生姓名</th><th>绑定时间</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Bindings", body)
 
 
 @app.post("/admin/weekly-files/generate")
