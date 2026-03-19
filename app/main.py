@@ -91,6 +91,12 @@ async def answer_with_rag_and_memory(
 
     # rag
     hits = (rindex.search(question, settings.rag_top_k) if rindex else [])
+    logger.info(
+        "rag search: user=%s q=%s hits=%s",
+        wecom_user_id,
+        (question or "")[:120],
+        len(hits),
+    )
     ctx_lines = []
     for i, (_chunk_id, text, _score) in enumerate(hits, start=1):
         ctx_lines.append(f"[{i}] {text.strip()}")
@@ -106,9 +112,12 @@ async def answer_with_rag_and_memory(
     if ctx:
         messages.append({"role": "system", "content": f"【知识库】\n{ctx}"})
 
-    for t in turns:
-        if t.role in ("user", "assistant"):
-            messages.append({"role": t.role, "content": t.content})
+    # If KB hits exist, avoid old memory overriding retrieval-grounded answers.
+    # This keeps WeCom and mini-program answers more consistent for same question.
+    if not hits:
+        for t in turns:
+            if t.role in ("user", "assistant"):
+                messages.append({"role": t.role, "content": t.content})
     messages.append({"role": "user", "content": question})
 
     reply = await deepseek_chat(messages)
@@ -441,7 +450,7 @@ def _looks_like_operator_command(cmd: str) -> bool:
     if not s:
         return False
     # 强约束：仅 #s 开头视为运维指令（例如：#s 统计今天CSP-J4班做题数据）
-    return bool(re.match(r"^\s*#s(\s+|$)", s, flags=re.IGNORECASE))
+    return bool(re.match(r"^\s*[#＃]s(\s+|$)", s, flags=re.IGNORECASE))
 
 
 async def _weekly_scheduler_loop() -> None:
@@ -651,6 +660,12 @@ async def _handle_weekly_command(db: Session, operator_id: str, text: str) -> st
 async def _handle_operator_ai_command(db: Session, operator_id: str, text: str) -> str | None:
     ops = _parse_op_ids()
     if not ops or operator_id not in ops:
+        if _looks_like_operator_command(text):
+            logger.info(
+                "operator command ignored: operator_id=%s not in whitelist=%s",
+                operator_id,
+                sorted(list(ops)),
+            )
         return None
 
     cmd = (text or "").strip()
@@ -659,7 +674,8 @@ async def _handle_operator_ai_command(db: Session, operator_id: str, text: str) 
     # 仅处理 #s 开头的显式运维口令，避免影响普通咨询对话。
     if not _looks_like_operator_command(cmd):
         return None
-    clean = re.sub(r"^\s*#s[\s,，:：-]*", "", cmd, flags=re.IGNORECASE).strip() or cmd
+    clean = re.sub(r"^\s*[#＃]s[\s,，:：-]*", "", cmd, flags=re.IGNORECASE).strip() or cmd
+    logger.info("operator command accepted: operator_id=%s raw=%s clean=%s", operator_id, cmd, clean)
 
     sender_userid = (settings.wecom_external_sender_id or "").strip() or operator_id
     try:
@@ -894,6 +910,7 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
         reply_text = "目前只支持文本咨询。请发送文字问题。"
     else:
         txt = msg.content.strip()
+        logger.info("wecom text received: from=%s content=%s", msg.from_user_name, txt[:200])
         cmd_reply = await _handle_weekly_command(db, msg.from_user_name, txt)
         if cmd_reply is not None:
             reply_text = cmd_reply
