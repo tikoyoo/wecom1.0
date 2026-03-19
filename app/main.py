@@ -5,6 +5,7 @@ import html
 import json
 import logging
 import re
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -30,12 +31,12 @@ from .db import (
     get_db,
     init_db,
 )
-from .hydro_service import get_weekly_students
+from .hydro_service import get_today_students_stats, get_weekly_students
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
-from .reports_service import send_weekly_reports
+from .reports_service import render_weekly_report, send_weekly_reports
 from .wecom_api import send_text
-from .wecom_external_api import get_external_contact, list_external_userids
+from .wecom_external_api import add_msg_template_single, get_external_contact, list_external_userids
 from .wecom_crypto import WeComCrypto
 from .wecom_xml import (
     build_encrypted_reply_xml,
@@ -188,6 +189,43 @@ def _weekly_schedule_file() -> Path:
     return p
 
 
+def _weekly_template_file() -> Path:
+    p = Path(settings.data_dir) / "weekly_report_template.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _default_weekly_template() -> str:
+    return (
+        "📊 {name} 的学习周报\n\n"
+        "👤 HYDRO ID：{uid}\n"
+        "📈 当前排名：第 {rank} 名\n\n"
+        "📚 本周作业：{hw_title}\n"
+        "✅ 完成情况：{hw_done}/{hw_total}\n\n"
+        "💡 本周AC：{week_ac} 题\n"
+        "📝 本周提交：{week_submits} 次\n"
+        "🔥 活跃天数：{active_days} 天（最近：{last_active}）\n\n"
+        "如需辅导建议，请直接回复本消息。"
+    )
+
+
+def _load_weekly_template() -> str:
+    fp = _weekly_template_file()
+    if not fp.exists():
+        return _default_weekly_template()
+    try:
+        t = fp.read_text(encoding="utf-8").strip()
+        return t or _default_weekly_template()
+    except Exception:
+        return _default_weekly_template()
+
+
+def _save_weekly_template(text: str) -> None:
+    fp = _weekly_template_file()
+    content = (text or "").strip() or _default_weekly_template()
+    fp.write_text(content, encoding="utf-8")
+
+
 def _load_weekly_schedule() -> dict[str, object]:
     fp = _weekly_schedule_file()
     if not fp.exists():
@@ -243,6 +281,161 @@ def _guess_uid_from_text(*texts: str) -> str:
     return ""
 
 
+def _extract_json_object(text: str) -> dict[str, object] | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _summarize_weekly_group_stats(db: Session, group: str = "") -> str:
+    wk = _latest_week_key(db)
+    if not wk:
+        return "暂无周数据，请先同步 Hydro 周数据。"
+    rows = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == wk).all()
+    if not rows:
+        return "暂无周数据，请先同步 Hydro 周数据。"
+    filt: list[StudentWeeklyMetric] = []
+    for r in rows:
+        if not group:
+            filt.append(r)
+            continue
+        try:
+            gs = json.loads(r.groups_json or "[]")
+        except Exception:
+            gs = []
+        if group in gs:
+            filt.append(r)
+    if not filt:
+        return f"周 {wk} 未找到班级 {group} 的学生数据。"
+    stu = len(filt)
+    sum_sub = sum(int(x.week_submits or 0) for x in filt)
+    sum_ac = sum(int(x.week_ac or 0) for x in filt)
+    avg_sub = round(sum_sub / stu, 2) if stu else 0
+    avg_ac = round(sum_ac / stu, 2) if stu else 0
+    return (
+        f"周统计（{wk}）{('班级=' + group) if group else '全量'}\n"
+        f"学生数：{stu}\n"
+        f"总提交：{sum_sub}，总AC：{sum_ac}\n"
+        f"人均提交：{avg_sub}，人均AC：{avg_ac}"
+    )
+
+
+def _summarize_today_stats(today_rows: list[dict], group: str = "") -> str:
+    filt: list[dict] = []
+    for r in today_rows:
+        gs = [str(x) for x in (r.get("groups") or [])]
+        if group and group not in gs:
+            continue
+        filt.append(r)
+    if not filt:
+        return f"今天未找到{('班级=' + group) if group else ''}学生数据。"
+    stu = len(filt)
+    sum_sub = sum(int(r.get("today_submits") or 0) for r in filt)
+    sum_ac = sum(int(r.get("today_ac") or 0) for r in filt)
+    top = sorted(filt, key=lambda x: (int(x.get("today_ac") or 0), int(x.get("today_submits") or 0)), reverse=True)[:5]
+    top_lines = "\n".join(
+        f"- {x.get('name','')}({x.get('uid','')}): 提交{int(x.get('today_submits') or 0)}，AC{int(x.get('today_ac') or 0)}"
+        for x in top
+    )
+    return (
+        f"今日统计 {('班级=' + group) if group else '全量'}\n"
+        f"学生数：{stu}\n"
+        f"总提交：{sum_sub}，总AC：{sum_ac}\n"
+        f"Top5：\n{top_lines}"
+    )
+
+
+async def _send_custom_message_to_scope(
+    db: Session,
+    *,
+    sender_userid: str,
+    message: str,
+    scope: str = "all",
+    student_uid: str = "",
+    group: str = "",
+) -> tuple[int, int, int]:
+    msg = (message or "").strip()
+    if not msg:
+        return (0, 0, 0)
+    scope = (scope or "all").strip().lower()
+    su = (student_uid or "").strip()
+    gp = (group or "").strip()
+
+    week = _latest_week_key(db)
+    week_groups: dict[str, list[str]] = defaultdict(list)
+    if week:
+        wrows = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == week).all()
+        for w in wrows:
+            try:
+                gs = [str(x).strip() for x in json.loads(w.groups_json or "[]")]
+            except Exception:
+                gs = []
+            week_groups[w.student_uid] = [x for x in gs if x]
+
+    targets = db.query(ParentStudentBinding).all()
+    ok = 0
+    fail = 0
+    skip = 0
+    for b in targets:
+        ext = (b.external_userid or "").strip()
+        if not ext:
+            skip += 1
+            continue
+        if scope == "student" and su and b.student_uid != su:
+            continue
+        if scope == "group" and gp and gp not in week_groups.get(b.student_uid, []):
+            continue
+        try:
+            await add_msg_template_single(external_userid=ext, content=msg, sender_userid=sender_userid)
+            ok += 1
+        except Exception:
+            fail += 1
+    return (ok, fail, skip)
+
+
+async def _parse_operator_intent(text: str) -> dict[str, object]:
+    raw = (text or "").strip()
+    quick = re.match(r"^发送今天做了多少道题给学生ID\s*([A-Za-z0-9_-]+)$", raw)
+    if quick:
+        return {
+            "action": "send_today_student",
+            "scope": "student",
+            "student_uid": quick.group(1),
+            "group": "",
+            "message": "",
+        }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是企业微信运营指令解析器。请把用户命令解析成 JSON，不要输出其它文字。\n"
+                "字段：action, scope, student_uid, group, message。\n"
+                "action 只允许：send_weekly, send_custom, send_today_student, stats_weekly, stats_today。\n"
+                "scope 只允许：all, group, student, me。\n"
+                "无法确定时：action=unknown，scope=all。"
+            ),
+        },
+        {"role": "user", "content": raw},
+    ]
+    out = await deepseek_chat(messages, temperature=0.0)
+    obj = _extract_json_object(out) or {}
+    return {
+        "action": str(obj.get("action") or "unknown").strip().lower(),
+        "scope": str(obj.get("scope") or "all").strip().lower(),
+        "student_uid": str(obj.get("student_uid") or "").strip(),
+        "group": str(obj.get("group") or "").strip(),
+        "message": str(obj.get("message") or "").strip(),
+    }
+
+
 async def _weekly_scheduler_loop() -> None:
     while True:
         try:
@@ -261,6 +454,7 @@ async def _weekly_scheduler_loop() -> None:
                         group=str(sch.get("group") or ""),
                         only_unfinished=bool(sch.get("only_unfinished", False)),
                         force_refresh=True,
+                        template_text=_load_weekly_template(),
                     )
                     logger.info(
                         "weekly scheduler sent: week=%s group=%s ok=%s fail=%s skip=%s",
@@ -446,6 +640,110 @@ async def _handle_weekly_command(db: Session, operator_id: str, text: str) -> st
     return "未识别指令。发送“周报 帮助”查看用法。"
 
 
+async def _handle_operator_ai_command(db: Session, operator_id: str, text: str) -> str | None:
+    ops = _parse_op_ids()
+    if not ops or operator_id not in ops:
+        return None
+
+    cmd = (text or "").strip()
+    if not cmd:
+        return None
+    # 仅处理显式运维口令，避免影响普通咨询对话。
+    if ("Hi bot" not in cmd) and (not cmd.startswith(("发送", "统计"))):
+        return None
+    clean = re.sub(r"^\s*Hi bot[,，:\s]*", "", cmd, flags=re.IGNORECASE).strip() or cmd
+
+    sender_userid = (settings.wecom_external_sender_id or "").strip() or operator_id
+    try:
+        intent = await _parse_operator_intent(clean)
+    except Exception as e:
+        return f"指令解析失败：{e}"
+
+    action = str(intent.get("action") or "unknown")
+    scope = str(intent.get("scope") or "all")
+    su = str(intent.get("student_uid") or "")
+    gp = str(intent.get("group") or "")
+    msg = str(intent.get("message") or "")
+
+    if action == "send_weekly":
+        if scope == "student" and su:
+            week_raw = get_weekly_students(db, force_refresh=True)
+            target_raw = None
+            for r in week_raw:
+                if str(r.get("uid") or "").strip() == su:
+                    target_raw = r
+                    break
+            if not target_raw:
+                return f"未找到 student_uid={su} 的周数据。"
+            target = db.query(ParentStudentBinding).filter(ParentStudentBinding.student_uid == su).all()
+            ok = 0
+            fail = 0
+            for b in target:
+                ext = (b.external_userid or "").strip()
+                if not ext:
+                    continue
+                try:
+                    content = render_weekly_report(target_raw, template_text=_load_weekly_template())
+                    await add_msg_template_single(external_userid=ext, content=content, sender_userid=sender_userid)
+                    ok += 1
+                except Exception:
+                    fail += 1
+            return f"已发送学生周报：student_uid={su}，ok={ok}，fail={fail}"
+        res = await send_weekly_reports(
+            db,
+            sender=sender_userid,
+            group=gp if scope == "group" else "",
+            force_refresh=True,
+            template_text=_load_weekly_template(),
+        )
+        return f"已执行周报发送：week={res.week_key} group={res.group or '全量'} ok={res.ok} fail={res.fail} skip={res.skip}"
+
+    if action == "send_today_student" and su:
+        today = get_today_students_stats()
+        row = next((r for r in today if str(r.get("uid") or "").strip() == su), None)
+        if not row:
+            return f"未找到 student_uid={su} 今日数据。"
+        msg_text = (
+            f"今日做题数据：{row.get('name','')}（{su}）\n"
+            f"提交：{int(row.get('today_submits') or 0)}，AC：{int(row.get('today_ac') or 0)}"
+        )
+        ok, fail, skip = await _send_custom_message_to_scope(
+            db,
+            sender_userid=sender_userid,
+            message=msg_text,
+            scope="student",
+            student_uid=su,
+        )
+        return f"已发送今日数据：student_uid={su} ok={ok} fail={fail} skip={skip}"
+
+    if action == "send_custom":
+        ok, fail, skip = await _send_custom_message_to_scope(
+            db,
+            sender_userid=sender_userid,
+            message=msg,
+            scope=scope,
+            student_uid=su,
+            group=gp,
+        )
+        return f"自定义消息已发送：scope={scope} group={gp or '-'} student_uid={su or '-'} ok={ok} fail={fail} skip={skip}"
+
+    if action == "stats_weekly":
+        return _summarize_weekly_group_stats(db, group=gp if scope == "group" else "")
+
+    if action == "stats_today":
+        today = get_today_students_stats()
+        return _summarize_today_stats(today, group=gp if scope == "group" else "")
+
+    return (
+        "未识别该运维指令。示例：\n"
+        "1) Hi bot 发送五维数据周报给每个学生\n"
+        "2) 发送今天做了多少道题给学生ID39\n"
+        "3) 发送今天要登录电子协会考级网站http://www.dzxh.com注册报名考级\n"
+        "4) 统计本周学生做题情况给我\n"
+        "5) 统计今天CSP-J4班的做题数据给我"
+    )
+
+
 @app.post("/api/wx-login")
 async def api_wx_login(body: WxLoginIn):
     if not settings.wx_mini_appid or not settings.wx_mini_secret:
@@ -592,7 +890,11 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
         if cmd_reply is not None:
             reply_text = cmd_reply
         else:
-            reply_text = await answer_with_rag_and_memory(db, msg.from_user_name, txt)
+            ai_cmd_reply = await _handle_operator_ai_command(db, msg.from_user_name, txt)
+            if ai_cmd_reply is not None:
+                reply_text = ai_cmd_reply
+            else:
+                reply_text = await answer_with_rag_and_memory(db, msg.from_user_name, txt)
 
     plain_reply = build_plain_text_reply(to_user=msg.from_user_name, from_user=msg.to_user_name, content=reply_text)
     encrypt, signature, ts = crypto.encrypt(plain_reply, nonce=nonce, timestamp=timestamp)
@@ -746,6 +1048,7 @@ async def admin_push_post(
 @app.get("/admin/reports", response_class=HTMLResponse)
 async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
     sch = _load_weekly_schedule()
+    weekly_template = _load_weekly_template()
     latest_week = _latest_week_key(db)
     class_count: dict[str, int] = {}
     if latest_week:
@@ -786,10 +1089,26 @@ async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(requ
     <div class="card">
       <h3>班级分类（来自 Hydro 最新周分组）</h3>
       {class_tip}
+      <form action="/admin/reports/sync-hydro" method="post" style="margin:8px 0 12px 0">
+        <button type="submit">同步 Hydro 分组并刷新班级</button>
+      </form>
       <table>
         <thead><tr><th>班级</th><th>人数</th><th>快速填入</th></tr></thead>
         <tbody>{class_rows or '<tr><td colspan="3">暂无班级数据</td></tr>'}</tbody>
       </table>
+    </div>
+    <div class="card">
+      <h3>周报发送模板（可修改）</h3>
+      <div style="margin-bottom:8px;color:#666">
+        可用变量：<code>{'{name}'}</code> <code>{'{uid}'}</code> <code>{'{rank}'}</code>
+        <code>{'{hw_title}'}</code> <code>{'{hw_done}'}</code> <code>{'{hw_total}'}</code>
+        <code>{'{week_ac}'}</code> <code>{'{week_submits}'}</code> <code>{'{active_days}'}</code>
+        <code>{'{last_active}'}</code> <code>{'{groups}'}</code>
+      </div>
+      <form action="/admin/reports/template" method="post">
+        <textarea name="template_text" rows="12" style="width:100%;font-family:monospace">{html.escape(weekly_template)}</textarea>
+        <div style="margin-top:10px"><button type="submit">保存周报模板</button></div>
+      </form>
     </div>
     <div class="card">
       <form action="/admin/reports/send-now" method="post">
@@ -978,6 +1297,7 @@ async def admin_reports_send_now(
         group=group.strip(),
         only_unfinished=(only_unfinished or "").strip() == "1",
         force_refresh=True,
+        template_text=_load_weekly_template(),
     )
     logger.info("admin send now: week=%s group=%s ok=%s fail=%s skip=%s", res.week_key, res.group, res.ok, res.fail, res.skip)
     return Response(status_code=303, headers={"Location": "/admin/reports"})
@@ -1000,6 +1320,27 @@ async def admin_reports_schedule(
     sch["group"] = group.strip()
     sch["only_unfinished"] = (only_unfinished or "").strip() == "1"
     _save_weekly_schedule(sch)
+    return Response(status_code=303, headers={"Location": "/admin/reports"})
+
+
+@app.post("/admin/reports/sync-hydro")
+async def admin_reports_sync_hydro(
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    try:
+        _sync_student_records_from_weekly(db, force_refresh=True)
+    except Exception as e:
+        logger.warning("reports sync hydro failed: %s", e)
+    return Response(status_code=303, headers={"Location": "/admin/reports"})
+
+
+@app.post("/admin/reports/template")
+async def admin_reports_template(
+    template_text: str = Form(""),
+    _user: str = Depends(require_admin),
+):
+    _save_weekly_template(template_text)
     return Response(status_code=303, headers={"Location": "/admin/reports"})
 
 

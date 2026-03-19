@@ -98,6 +98,46 @@ try {
 """
 
 
+HYDRO_TODAY_JS = r"""
+try {
+ const domain = 'system';
+ const now = new Date();
+ const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+ const dayObjId = ObjectId(Math.floor(dayStart/1000).toString(16) + "0000000000000000");
+
+ const users = db['domain.user'].find({ domainId: domain, nAccept: { $gt: 0 } }).toArray();
+ const results = users.map(u => {
+   const uid = u.uid;
+   const groups = db['user.group'].find({ domainId: domain, uids: uid }).toArray().map(g => g.name);
+   const records = db.record.find({
+     uid: uid,
+     domainId: domain,
+     _id: { $gt: dayObjId }
+   }).toArray();
+   const acPids = db.record.distinct("pid", {
+     uid: uid,
+     domainId: domain,
+     status: 1,
+     _id: { $gt: dayObjId }
+   });
+   return {
+     uid: uid,
+     name: u.displayName || "未知",
+     groups: groups,
+     today_submits: records.length,
+     today_ac: acPids.length
+   };
+ });
+
+ print("---JSON_START---");
+ print(JSON.stringify(results));
+ print("---JSON_END---");
+} catch(e) {
+ print("ERROR: " + e.message);
+}
+"""
+
+
 def _run_remote_hydro_db(js: str) -> list[dict]:
     if not (settings.hydro_ssh_host and settings.hydro_ssh_user and settings.hydro_ssh_key_path):
         raise RuntimeError("Hydro SSH config missing (HYDRO_SSH_HOST/HYDRO_SSH_USER/HYDRO_SSH_KEY_PATH)")
@@ -199,3 +239,8 @@ def get_weekly_students(db: Session, force_refresh: bool = False) -> list[dict]:
 
     _persist_weekly_metrics(db, data, now.replace(tzinfo=None))
     return data
+
+
+def get_today_students_stats() -> list[dict]:
+    """Returns today's submits/ac counts from Hydro for all students."""
+    return _run_remote_hydro_db(HYDRO_TODAY_JS)
