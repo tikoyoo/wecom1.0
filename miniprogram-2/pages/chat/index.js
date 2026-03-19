@@ -5,10 +5,12 @@ function formatReqError(err) {
   return '网络异常';
 }
 
-function isLikelyStudentName(text) {
+function parseStudentIdentity(text) {
   const v = String(text || '').trim();
-  // 仅允许常见中文姓名字符，绑定前避免误把聊天内容当姓名请求
-  return /^[\u4e00-\u9fa5·]{2,8}$/.test(v);
+  // 支持示例：张睿宸 37 / 张睿宸,37 / 张睿宸#37
+  const m = v.match(/^([\u4e00-\u9fa5·]{2,20})[\s,，#|/:-]+([A-Za-z0-9_-]{1,32})$/);
+  if (!m) return null;
+  return { student_name: m[1], student_uid: m[2] };
 }
 
 Page({
@@ -119,11 +121,11 @@ Page({
         this._pushBot('已识别到你绑定的孩子信息，可以开始聊天了。');
       } else {
         this.setData({ phase: 'need_name' });
-        this._pushBot('请先发送孩子姓名（例如：张睿宸），我会自动匹配并绑定。');
+        this._pushBot('请先发送“孩子姓名 + HYDRO ID”（例如：张睿宸 37），通过后才可聊天。');
       }
     } catch (e) {
       this.setData({ phase: 'need_name' });
-      this._pushBot('请先发送孩子姓名（例如：张睿宸），我会自动匹配并绑定。');
+      this._pushBot('请先发送“孩子姓名 + HYDRO ID”（例如：张睿宸 37），通过后才可聊天。');
     }
 
     if (!(this.data.openid && String(this.data.openid).trim())) {
@@ -234,25 +236,24 @@ Page({
 
     try {
       if (phase !== 'chatting' || !student_uid) {
-        if (!isLikelyStudentName(content)) {
-          this._pushBot('绑定完成前仅支持发送孩子姓名（2-8个中文字符），暂不提供聊天回复。');
+        const parsed = parseStudentIdentity(content);
+        if (!parsed) {
+          this._pushBot('绑定完成前仅支持发送“孩子姓名 + HYDRO ID”（例如：张睿宸 37），暂不提供聊天回复。');
           wx.nextTick(this.scrollToBottom);
           return;
         }
         const r = await this._req('/api/bind-by-student-name', 'POST', {
           openid: oid,
-          student_name: content,
+          student_name: parsed.student_name,
+          student_uid: parsed.student_uid,
           parent_name: '',
         });
         if (r && r.status === 'approved') {
           this.setData({ student_uid: r.student_uid, phase: 'chatting' });
           this._pushBot('匹配成功，已完成绑定。现在可以开始提问了。');
-        } else if (r && r.status === 'not_found') {
-          this.setData({ phase: 'need_name' });
-          this._pushBot('未在名单中找到该姓名，请检查后再发，或联系老师先在后台添加学生名录。');
         } else {
           this.setData({ phase: 'pending' });
-          this._pushBot('暂时无法唯一匹配到孩子信息，已进入待审核。老师确认后即可聊天。');
+          this._pushBot('未能自动通过，已进入待审核。老师确认后即可聊天。');
         }
         wx.nextTick(this.scrollToBottom);
         return;

@@ -255,6 +255,7 @@ class WxLoginIn(BaseModel):
 class BindByStudentNameIn(BaseModel):
     openid: str = Field(min_length=1)
     student_name: str = Field(min_length=1)
+    student_uid: str = Field(min_length=1)
     parent_name: str = ""
 
 
@@ -320,9 +321,10 @@ async def api_binding_status(openid: str = "", db: Session = Depends(get_db)):
 async def api_bind_by_student_name(body: BindByStudentNameIn, db: Session = Depends(get_db)):
     openid = body.openid.strip()
     raw_name = body.student_name.strip()
+    raw_uid = body.student_uid.strip()
     key = _norm_student_name(raw_name)
-    if not openid or not key:
-        raise HTTPException(status_code=400, detail="openid and student_name required")
+    if not openid or not key or not raw_uid:
+        raise HTTPException(status_code=400, detail="openid, student_name and student_uid required")
 
     existing = (
         db.query(ParentStudentBinding).filter(ParentStudentBinding.openid == openid).order_by(ParentStudentBinding.id.asc()).first()
@@ -330,31 +332,28 @@ async def api_bind_by_student_name(body: BindByStudentNameIn, db: Session = Depe
     if existing:
         return {"status": "approved", "student_uid": existing.student_uid}
 
-    matches = db.query(StudentRecord).filter(StudentRecord.name_key == key).all()
-    if not matches:
+    target = db.query(StudentRecord).filter(StudentRecord.student_uid == raw_uid).one_or_none()
+    if target is None:
         # 名录为空/过期时，优先尝试从最近周数据自动回填一次
         _sync_student_records_from_weekly(db, force_refresh=False)
-        matches = db.query(StudentRecord).filter(StudentRecord.name_key == key).all()
-    if not matches:
-        return {"status": "not_found"}
+        target = db.query(StudentRecord).filter(StudentRecord.student_uid == raw_uid).one_or_none()
 
-    if len(matches) == 1:
-        uid = matches[0].student_uid
-        db.add(ParentStudentBinding(openid=openid, student_uid=uid))
-        db.commit()
-        return {"status": "approved", "student_uid": uid}
-
-    cand = [m.student_uid for m in matches]
-    db.add(
-        BindingNameRequest(
-            openid=openid,
-            student_name_submitted=raw_name,
-            candidates_json=json.dumps(cand, ensure_ascii=False),
-            status="pending",
+    # 不成功绑定统一进入待审核
+    if target is None or target.name_key != key:
+        db.add(
+            BindingNameRequest(
+                openid=openid,
+                student_name_submitted=f"{raw_name}|{raw_uid}",
+                candidates_json=json.dumps(([raw_uid] if raw_uid else []), ensure_ascii=False),
+                status="pending",
+            )
         )
-    )
+        db.commit()
+        return {"status": "pending"}
+
+    db.add(ParentStudentBinding(openid=openid, student_uid=target.student_uid))
     db.commit()
-    return {"status": "pending", "candidates": cand}
+    return {"status": "approved", "student_uid": target.student_uid}
 
 
 @app.post("/api/chat")
@@ -719,29 +718,14 @@ async def admin_students(db: Session = Depends(get_db), _user: str = Depends(req
     latest_week = _latest_week_key(db)
     weekly_count = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == latest_week).count() if latest_week else 0
     rows = "".join(
-        (
-            f"<tr><td>{s.id}</td><td><code>{html.escape(s.student_uid)}</code></td>"
-            f"<td>{html.escape(s.display_name)}</td><td><code>{html.escape(s.name_key)}</code></td>"
-            f"<td>{s.created_at}</td>"
-            f"<td>"
-            f"<form action='/admin/students/update' method='post' style='display:flex;gap:6px;align-items:center'>"
-            f"<input type='hidden' name='record_id' value='{s.id}' />"
-            f"<input name='student_uid' value='{html.escape(s.student_uid, quote=True)}' style='width:120px' />"
-            f"<input name='display_name' value='{html.escape(s.display_name, quote=True)}' style='width:120px' />"
-            f"<button type='submit'>修改</button>"
-            f"</form>"
-            f"<form action='/admin/students/delete' method='post' style='margin-top:6px'>"
-            f"<input type='hidden' name='record_id' value='{s.id}' />"
-            f"<button type='submit' class='secondary'>删除</button>"
-            f"</form>"
-            f"</td></tr>"
-        )
+        f"<tr><td>{s.id}</td><td><code>{html.escape(s.student_uid)}</code></td>"
+        f"<td>{html.escape(s.display_name)}</td><td><code>{html.escape(s.name_key)}</code></td>"
+        f"<td>{s.created_at}</td></tr>"
         for s in students
     )
     body = f"""
-    <h2>学生名录</h2>
-    <p>小程序家长发送<strong>孩子姓名</strong>时，会与这里的<strong>规范化姓名</strong>（去空白）做<strong>精确匹配</strong>。
-    多条同名会进入「待审核绑定」。</p>
+    <h2>学生名录（只读）</h2>
+    <p>小程序家长需发送<strong>孩子姓名 + HYDRO ID</strong>，系统会按这里的数据做绑定校验。名录只通过每周同步更新，不做手工增删改。</p>
     <div class="card">
       <div style="margin-bottom:10px">
         最新周数据：<code>{html.escape(latest_week or "无")}</code>，
@@ -759,94 +743,14 @@ async def admin_students(db: Session = Depends(get_db), _user: str = Depends(req
       </form>
     </div>
     <div class="card">
-      <form action="/admin/students/add" method="post">
-        <div style="margin-bottom:10px">
-          <label>student_uid（Hydro UID 或业务唯一 ID）</label>
-          <input name="student_uid" required placeholder="例如 1001" />
-        </div>
-        <div style="margin-bottom:10px">
-          <label>姓名（显示名，匹配时会去掉所有空白）</label>
-          <input name="display_name" required placeholder="例如 张 睿 宸" />
-        </div>
-        <button type="submit">添加</button>
-      </form>
-    </div>
-    <div class="card">
       <table>
-        <thead><tr><th>ID</th><th>student_uid</th><th>姓名</th><th>name_key</th><th>时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>ID</th><th>student_uid</th><th>姓名</th><th>name_key</th><th>时间</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
     <div><a href="/admin/">返回</a></div>
     """
     return html_page("Students", body)
-
-
-@app.post("/admin/students/add")
-async def admin_students_add(
-    student_uid: str = Form(...),
-    display_name: str = Form(...),
-    db: Session = Depends(get_db),
-    _user: str = Depends(require_admin),
-):
-    uid = student_uid.strip()
-    dn = display_name.strip()
-    nk = _norm_student_name(dn)
-    if not uid or not nk:
-        return Response(status_code=303, headers={"Location": "/admin/students"})
-    ex = db.query(StudentRecord).filter(StudentRecord.student_uid == uid).one_or_none()
-    if ex:
-        ex.display_name = dn
-        ex.name_key = nk
-    else:
-        db.add(StudentRecord(student_uid=uid, display_name=dn, name_key=nk))
-    db.commit()
-    return Response(status_code=303, headers={"Location": "/admin/students"})
-
-
-@app.post("/admin/students/update")
-async def admin_students_update(
-    record_id: int = Form(...),
-    student_uid: str = Form(...),
-    display_name: str = Form(...),
-    db: Session = Depends(get_db),
-    _user: str = Depends(require_admin),
-):
-    row = db.query(StudentRecord).filter(StudentRecord.id == record_id).one_or_none()
-    if not row:
-        return Response(status_code=303, headers={"Location": "/admin/students"})
-    uid = student_uid.strip()
-    dn = display_name.strip()
-    nk = _norm_student_name(dn)
-    if not uid or not nk:
-        return Response(status_code=303, headers={"Location": "/admin/students"})
-    dup = db.query(StudentRecord).filter(StudentRecord.student_uid == uid, StudentRecord.id != record_id).one_or_none()
-    if dup:
-        return Response(status_code=303, headers={"Location": "/admin/students"})
-    old_uid = row.student_uid
-    row.student_uid = uid
-    row.display_name = dn
-    row.name_key = nk
-    if old_uid != uid:
-        binds = db.query(ParentStudentBinding).filter(ParentStudentBinding.student_uid == old_uid).all()
-        for b in binds:
-            b.student_uid = uid
-    db.commit()
-    return Response(status_code=303, headers={"Location": "/admin/students"})
-
-
-@app.post("/admin/students/delete")
-async def admin_students_delete(
-    record_id: int = Form(...),
-    db: Session = Depends(get_db),
-    _user: str = Depends(require_admin),
-):
-    row = db.query(StudentRecord).filter(StudentRecord.id == record_id).one_or_none()
-    if row:
-        db.query(ParentStudentBinding).filter(ParentStudentBinding.student_uid == row.student_uid).delete()
-        db.delete(row)
-        db.commit()
-    return Response(status_code=303, headers={"Location": "/admin/students"})
 
 
 @app.post("/admin/students/sync-weekly")

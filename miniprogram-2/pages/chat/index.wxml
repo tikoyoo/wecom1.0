@@ -36,7 +36,7 @@
       value="{{ input }}"
       type="text"
       confirm-type="send"
-      placeholder="请输入孩子姓名或问题"
+      placeholder="请输入：孩子姓名 + HYDRO ID"
       placeholder-style="color: #00000066"
       adjust-position="{{ false }}"
       hold-keyboard
