@@ -274,7 +274,7 @@ def _parse_op_ids() -> set[str]:
     raw = (settings.wecom_weekly_operator_ids or "").strip()
     if not raw:
         return set()
-    return {x.strip() for x in re.split(r"[,\s|]+", raw) if x.strip()}
+    return {x.strip().lower() for x in re.split(r"[,\s|]+", raw) if x.strip()}
 
 
 def _guess_uid_from_text(*texts: str) -> str:
@@ -605,7 +605,8 @@ class ChatIn(BaseModel):
 
 async def _handle_weekly_command(db: Session, operator_id: str, text: str) -> str | None:
     ops = _parse_op_ids()
-    if not ops or operator_id not in ops:
+    op = (operator_id or "").strip().lower()
+    if not ops or op not in ops:
         return None
 
     cmd = (text or "").strip()
@@ -673,7 +674,8 @@ async def _handle_weekly_command(db: Session, operator_id: str, text: str) -> st
 
 async def _handle_operator_ai_command(db: Session, operator_id: str, text: str) -> str | None:
     ops = _parse_op_ids()
-    if not ops or operator_id not in ops:
+    op = (operator_id or "").strip().lower()
+    if not ops or op not in ops:
         if _looks_like_operator_command(text):
             logger.info(
                 "operator command ignored: operator_id=%s not in whitelist=%s",
