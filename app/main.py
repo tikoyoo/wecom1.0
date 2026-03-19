@@ -52,6 +52,7 @@ crypto: WeComCrypto | None = None
 
 rindex: RagIndex | None = None
 weekly_scheduler_task: asyncio.Task | None = None
+WECOM_REPLY_MAX_CHARS = 1800
 
 
 def _rebuild_index(db: Session) -> None:
@@ -920,6 +921,18 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
                 reply_text = ai_cmd_reply
             else:
                 reply_text = await answer_with_rag_and_memory(db, msg.from_user_name, txt)
+
+    # WeCom callback text payload has practical size limits; overlong replies may be dropped and retried.
+    if len(reply_text) > WECOM_REPLY_MAX_CHARS:
+        logger.info(
+            "wecom reply truncated: from=%s orig_len=%s max_len=%s",
+            msg.from_user_name,
+            len(reply_text),
+            WECOM_REPLY_MAX_CHARS,
+        )
+        reply_text = reply_text[:WECOM_REPLY_MAX_CHARS] + "\n\n（内容较长，已截断）"
+    else:
+        logger.info("wecom reply length: from=%s len=%s", msg.from_user_name, len(reply_text))
 
     plain_reply = build_plain_text_reply(to_user=msg.from_user_name, from_user=msg.to_user_name, content=reply_text)
     encrypt, signature, ts = crypto.encrypt(plain_reply, nonce=nonce, timestamp=timestamp)
