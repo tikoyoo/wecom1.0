@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 无论 uvicorn 工作目录在哪，都从「项目根目录」加载 .env（与 app/ 同级）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE) if _ENV_FILE.is_file() else None,
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     # WeCom
     wecom_corp_id: str = ""
@@ -12,12 +24,6 @@ class Settings(BaseSettings):
     wecom_agent_id: int = 0
     wecom_token: str = ""
     wecom_encoding_aes_key: str = ""
-
-    # WeCom WeChat Customer Service (微信客服)
-    # Uses a separate secret and a separate callback token/aes key
-    wecom_kf_secret: str = ""
-    wecom_kf_token: str = ""
-    wecom_kf_encoding_aes_key: str = ""
 
     # DeepSeek (OpenAI-compatible)
     deepseek_base_url: str = "https://api.deepseek.com/v1"
@@ -44,14 +50,16 @@ class Settings(BaseSettings):
     # Storage
     data_dir: str = "./data"
 
-    # Hydro (via SSH)
-    hydro_ssh_host: str = ""
-    hydro_ssh_user: str = ""
-    hydro_ssh_key_path: str = ""
+    # 微信小程序（code2Session，用于小程序 openid）
+    wx_mini_appid: str = ""
+    wx_mini_secret: str = ""
 
-    # WeCom Customer Contact (externalcontact) for outbound reports
-    # The follow-up member userid used as sender in add_msg_template
-    wecom_external_sender_id: str = ""
+    @field_validator("wx_mini_appid", "wx_mini_secret", mode="before")
+    @classmethod
+    def _strip_mini_secrets(cls, v: object) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
 
 
 settings = Settings()

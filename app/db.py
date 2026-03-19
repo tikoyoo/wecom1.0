@@ -64,114 +64,41 @@ class Chunk(Base):
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
 
-class ParentContact(Base):
-    """
-    External parent contact in WeCom Customer Contact (externalcontact).
-    """
+class StudentRecord(Base):
+    """学生名录（姓名匹配用）；可从 Hydro 同步或后台手工维护。"""
 
-    __tablename__ = "parent_contacts"
+    __tablename__ = "student_records"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    external_userid: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    name: Mapped[str] = mapped_column(String(128), default="")
-    remark: Mapped[str] = mapped_column(String(256), default="")
-    follow_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-
-    bindings: Mapped[list["ParentStudentBinding"]] = relationship(back_populates="parent", cascade="all, delete-orphan")
+    student_uid: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(256))
+    name_key: Mapped[str] = mapped_column(String(256), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class ParentStudentBinding(Base):
-    """
-    Manual binding between parent (external_userid) and Hydro student uid.
-    Supports multiple parents per student.
-    """
+    """小程序 openid 与 Hydro/业务 student_uid 的绑定（已通过匹配或审核）。"""
 
     __tablename__ = "parent_student_bindings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    parent_id: Mapped[int] = mapped_column(ForeignKey("parent_contacts.id"), index=True)
-    student_uid: Mapped[str] = mapped_column(String(64), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-
-    parent: Mapped["ParentContact"] = relationship(back_populates="bindings")
+    openid: Mapped[str] = mapped_column(String(128), index=True)
+    student_uid: Mapped[str] = mapped_column(String(128), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class HydroCache(Base):
-    """
-    Cached Hydro weekly stats per student uid to enforce rate limits.
-    """
+class BindingNameRequest(Base):
+    """姓名无法唯一匹配时的待审核记录。"""
 
-    __tablename__ = "hydro_cache"
+    __tablename__ = "binding_name_requests"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    student_uid: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    payload_json: Mapped[str] = mapped_column(Text, default="")
-    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-
-
-class StudentWeeklyMetric(Base):
-    """
-    Weekly metrics snapshot per Hydro student uid.
-    One row per (week_key, student_uid). week_key uses ISO week like "2026-W12".
-    """
-
-    __tablename__ = "student_weekly_metrics"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    week_key: Mapped[str] = mapped_column(String(16), index=True)
-    student_uid: Mapped[str] = mapped_column(String(64), index=True)
-    name: Mapped[str] = mapped_column(String(128), default="")
-    rank: Mapped[int] = mapped_column(Integer, default=999)
-    groups_json: Mapped[str] = mapped_column(Text, default="[]")
-    hw_title: Mapped[str] = mapped_column(String(256), default="")
-    hw_done: Mapped[int] = mapped_column(Integer, default=0)
-    hw_total: Mapped[int] = mapped_column(Integer, default=0)
-    week_submits: Mapped[int] = mapped_column(Integer, default=0)
-    week_ac: Mapped[int] = mapped_column(Integer, default=0)
-    active_days: Mapped[int] = mapped_column(Integer, default=0)
-    last_active: Mapped[str] = mapped_column(String(64), default="")
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-
-
-class ExternalSendLog(Base):
-    """
-    Outbound send log for externalcontact add_msg_template.
-    """
-
-    __tablename__ = "external_send_logs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-    week_key: Mapped[str] = mapped_column(String(16), index=True)
-    sender_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
-    group_filter: Mapped[str] = mapped_column(String(128), default="", index=True)
-    only_unfinished: Mapped[int] = mapped_column(Integer, default=0)
-
-    student_uid: Mapped[str] = mapped_column(String(64), default="", index=True)
-    external_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
-
-    status: Mapped[str] = mapped_column(String(16), default="ok")  # ok/fail
-    msgid: Mapped[str] = mapped_column(String(128), default="")
-    response_json: Mapped[str] = mapped_column(Text, default="")
-    error: Mapped[str] = mapped_column(Text, default="")
-
-
-class BindingRequest(Base):
-    """
-    Pending binding request from a parent (external_userid) to a student (hydro uid).
-    Teacher approval will convert it into ParentStudentBinding.
-    """
-
-    __tablename__ = "binding_requests"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    external_userid: Mapped[str] = mapped_column(String(128), index=True)
-    student_uid: Mapped[str] = mapped_column(String(64), index=True)
-    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/approved/rejected
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-    reviewed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
-    reviewer: Mapped[str] = mapped_column(String(128), default="")
+    openid: Mapped[str] = mapped_column(String(128), index=True)
+    student_name_submitted: Mapped[str] = mapped_column(String(256))
+    candidates_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    resolved_student_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 def init_db() -> None:

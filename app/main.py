@@ -1,30 +1,33 @@
 from __future__ import annotations
 
-import asyncio
+import html
+import json
 import logging
+import re
 from contextlib import asynccontextmanager
-from datetime import datetime
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+import httpx
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .admin import html_page, require_admin
 from .config import settings
-from .db import ChatMessage, Document, User, get_db, init_db
-import json as _json
-
-from .db import BindingRequest, ExternalSendLog, ParentContact, ParentStudentBinding, StudentWeeklyMetric
-from .hydro_service import get_weekly_students
-from .reports_service import render_weekly_report
+from .db import (
+    BindingNameRequest,
+    ChatMessage,
+    Document,
+    ParentStudentBinding,
+    StudentRecord,
+    User,
+    get_db,
+    init_db,
+)
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
 from .wecom_api import send_text
 from .wecom_crypto import WeComCrypto
-from .wecom_external_api import add_msg_template_single, get_external_contact, list_external_contacts
-from .wecom_kf_api import kf_send_text, kf_sync_msg
-from .wecom_kf_xml import parse_kf_event_xml
 from .wecom_xml import (
     build_encrypted_reply_xml,
     build_plain_text_reply,
@@ -36,7 +39,6 @@ logger = logging.getLogger("wecom-bot")
 
 
 crypto: WeComCrypto | None = None
-kf_crypto: WeComCrypto | None = None
 
 rindex: RagIndex | None = None
 
@@ -57,7 +59,13 @@ def _get_or_create_user(db: Session, wecom_user_id: str) -> User:
     return u
 
 
-async def answer_with_rag_and_memory(db: Session, wecom_user_id: str, question: str) -> str:
+async def answer_with_rag_and_memory(
+    db: Session,
+    wecom_user_id: str,
+    question: str,
+    *,
+    extra_system: str | None = None,
+) -> str:
     user = _get_or_create_user(db, wecom_user_id)
 
     # memory
@@ -81,6 +89,8 @@ async def answer_with_rag_and_memory(db: Session, wecom_user_id: str, question: 
         "你是企业客服与咨询助手。优先根据【知识库】回答；如果知识库没有相关信息，明确说明并给出可执行的建议。"
         "回答要简洁、中文、结构清晰。若引用知识库，请在句末用 [1]/[2] 标注来源编号。"
     )
+    if extra_system:
+        system = f"{system}\n\n{extra_system}"
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     if ctx:
         messages.append({"role": "system", "content": f"【知识库】\n{ctx}"})
@@ -98,28 +108,6 @@ async def answer_with_rag_and_memory(db: Session, wecom_user_id: str, question: 
     return reply
 
 
-async def _answer_and_push(wecom_user_id: str, question: str) -> None:
-    try:
-        with next(get_db()) as db:  # type: ignore[arg-type]
-            reply = await answer_with_rag_and_memory(db, wecom_user_id, question)
-        await send_text(touser=wecom_user_id, content=reply)
-    except Exception:
-        logger.exception("async push failed")
-        try:
-            await send_text(touser=wecom_user_id, content="抱歉，刚才处理超时或出错了。请稍后再试一次。")
-        except Exception:
-            logger.exception("fallback push failed")
-
-
-async def _kf_answer_and_push(open_kfid: str, external_userid: str, question: str) -> None:
-    try:
-        with next(get_db()) as db:  # type: ignore[arg-type]
-            reply = await answer_with_rag_and_memory(db, f"kf:{external_userid}", question)
-        await kf_send_text(open_kfid=open_kfid, external_userid=external_userid, content=reply)
-    except Exception:
-        logger.exception("kf async push failed")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.basicConfig(
@@ -129,17 +117,11 @@ async def lifespan(app: FastAPI):
     init_db()
     with next(get_db()) as db:  # type: ignore[arg-type]
         _rebuild_index(db)
-    global crypto, kf_crypto
+    global crypto
     if settings.wecom_token and settings.wecom_encoding_aes_key and settings.wecom_corp_id:
         crypto = WeComCrypto(
             token=settings.wecom_token,
             encoding_aes_key=settings.wecom_encoding_aes_key,
-            corp_id=settings.wecom_corp_id,
-        )
-    if settings.wecom_kf_token and settings.wecom_kf_encoding_aes_key and settings.wecom_corp_id:
-        kf_crypto = WeComCrypto(
-            token=settings.wecom_kf_token,
-            encoding_aes_key=settings.wecom_kf_encoding_aes_key,
             corp_id=settings.wecom_corp_id,
         )
     yield
@@ -151,6 +133,150 @@ app = FastAPI(title="WeCom KB Bot", version="0.1.0", lifespan=lifespan)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/mini-status")
+async def api_mini_status():
+    """给小程序/运维自检：是否配置了微信 AppID/Secret（不返回 Secret）。"""
+    aid = (settings.wx_mini_appid or "").strip()
+    has_secret = bool((settings.wx_mini_secret or "").strip())
+    return {
+        "wx_mini_configured": bool(aid and has_secret),
+        "appid": aid or None,
+        "secret_configured": has_secret,
+        "hint": "小程序工具里的 AppID 须与此处一致；改 .env 后必须重启后端进程。",
+    }
+
+
+def _norm_student_name(name: str) -> str:
+    s = (name or "").strip()
+    return re.sub(r"\s+", "", s)
+
+
+class WxLoginIn(BaseModel):
+    code: str = Field(min_length=1)
+
+
+class BindByStudentNameIn(BaseModel):
+    openid: str = Field(min_length=1)
+    student_name: str = Field(min_length=1)
+    parent_name: str = ""
+
+
+class ChatIn(BaseModel):
+    openid: str = Field(min_length=1)
+    student_uid: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+
+
+@app.post("/api/wx-login")
+async def api_wx_login(body: WxLoginIn):
+    if not settings.wx_mini_appid or not settings.wx_mini_secret:
+        logger.warning("wx-login 拒绝: 未配置 WX_MINI_APPID / WX_MINI_SECRET")
+        raise HTTPException(status_code=503, detail="微信小程序未配置（WX_MINI_APPID / WX_MINI_SECRET）")
+    url = "https://api.weixin.qq.com/sns/jscode2session"
+    params = {
+        "appid": settings.wx_mini_appid.strip(),
+        "secret": settings.wx_mini_secret.strip(),
+        "js_code": body.code.strip(),
+        "grant_type": "authorization_code",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url, params=params)
+            r.raise_for_status()
+            try:
+                data = r.json()
+            except Exception:
+                logger.exception("jscode2session 响应非 JSON: %s", r.text[:200])
+                raise HTTPException(status_code=502, detail="微信接口返回非 JSON，请稍后重试")
+    except HTTPException:
+        raise
+    except httpx.HTTPError as e:
+        logger.exception("请求 jscode2session 失败")
+        raise HTTPException(status_code=502, detail=f"无法连接微信接口: {e}") from e
+
+    errcode = data.get("errcode", 0) or 0
+    if errcode:
+        errmsg = data.get("errmsg") or f"wx err {errcode}"
+        logger.warning("jscode2session errcode=%s errmsg=%s", errcode, errmsg)
+        raise HTTPException(status_code=400, detail=f"{errmsg} (errcode={errcode})")
+    openid = data.get("openid")
+    if not openid:
+        logger.warning("jscode2session 无 openid 字段: %s", data)
+        raise HTTPException(status_code=400, detail="no openid in wx response")
+    return {"openid": openid}
+
+
+@app.get("/api/binding-status")
+async def api_binding_status(openid: str = "", db: Session = Depends(get_db)):
+    if not (openid or "").strip():
+        return {"approved_students": []}
+    rows = (
+        db.query(ParentStudentBinding)
+        .filter(ParentStudentBinding.openid == openid.strip())
+        .order_by(ParentStudentBinding.created_at.asc())
+        .all()
+    )
+    return {"approved_students": [r.student_uid for r in rows]}
+
+
+@app.post("/api/bind-by-student-name")
+async def api_bind_by_student_name(body: BindByStudentNameIn, db: Session = Depends(get_db)):
+    openid = body.openid.strip()
+    raw_name = body.student_name.strip()
+    key = _norm_student_name(raw_name)
+    if not openid or not key:
+        raise HTTPException(status_code=400, detail="openid and student_name required")
+
+    existing = (
+        db.query(ParentStudentBinding).filter(ParentStudentBinding.openid == openid).order_by(ParentStudentBinding.id.asc()).first()
+    )
+    if existing:
+        return {"status": "approved", "student_uid": existing.student_uid}
+
+    matches = db.query(StudentRecord).filter(StudentRecord.name_key == key).all()
+    if not matches:
+        return {"status": "not_found"}
+
+    if len(matches) == 1:
+        uid = matches[0].student_uid
+        db.add(ParentStudentBinding(openid=openid, student_uid=uid))
+        db.commit()
+        return {"status": "approved", "student_uid": uid}
+
+    cand = [m.student_uid for m in matches]
+    db.add(
+        BindingNameRequest(
+            openid=openid,
+            student_name_submitted=raw_name,
+            candidates_json=json.dumps(cand, ensure_ascii=False),
+            status="pending",
+        )
+    )
+    db.commit()
+    return {"status": "pending", "candidates": cand}
+
+
+@app.post("/api/chat")
+async def api_chat(body: ChatIn, db: Session = Depends(get_db)):
+    openid = body.openid.strip()
+    student_uid = body.student_uid.strip()
+    msg = body.message.strip()
+    if not openid or not student_uid or not msg:
+        raise HTTPException(status_code=400, detail="invalid body")
+
+    ok = (
+        db.query(ParentStudentBinding)
+        .filter(ParentStudentBinding.openid == openid, ParentStudentBinding.student_uid == student_uid)
+        .first()
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="not bound for this openid/student_uid")
+
+    extra = f"【会话上下文】家长已通过小程序认证（openid）。当前绑定学生 student_uid={student_uid}。"
+    reply = await answer_with_rag_and_memory(db, f"mp:{openid}", msg, extra_system=extra)
+    return {"reply": reply}
 
 
 @app.get("/wecom/callback")
@@ -168,14 +294,7 @@ async def wecom_verify(msg_signature: str, timestamp: str, nonce: str, echostr: 
 
 
 @app.post("/wecom/callback")
-async def wecom_callback(
-    request: Request,
-    msg_signature: str,
-    timestamp: str,
-    nonce: str,
-    background: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
+async def wecom_callback(request: Request, msg_signature: str, timestamp: str, nonce: str, db: Session = Depends(get_db)):
     if crypto is None:
         return PlainTextResponse("wecom not configured", status_code=500)
     body = await request.body()
@@ -189,60 +308,12 @@ async def wecom_callback(
     if msg.msg_type != "text" or not msg.content.strip():
         reply_text = "目前只支持文本咨询。请发送文字问题。"
     else:
-        # WeCom requires a quick response; long LLM calls can time out.
-        question = msg.content.strip()
-        background.add_task(asyncio.run, _answer_and_push(msg.from_user_name, question))
-        reply_text = "已收到，我正在查询并整理答案，稍后会再发一条消息给你。"
+        reply_text = await answer_with_rag_and_memory(db, msg.from_user_name, msg.content.strip())
 
     plain_reply = build_plain_text_reply(to_user=msg.from_user_name, from_user=msg.to_user_name, content=reply_text)
     encrypt, signature, ts = crypto.encrypt(plain_reply, nonce=nonce, timestamp=timestamp)
     resp = build_encrypted_reply_xml(encrypt=encrypt, signature=signature, timestamp=ts, nonce=nonce)
     return Response(content=resp, media_type="application/xml")
-
-
-@app.get("/wecom/kf/callback")
-async def wecom_kf_verify(msg_signature: str, timestamp: str, nonce: str, echostr: str):
-    if kf_crypto is None:
-        return PlainTextResponse("wecom kf not configured", status_code=500)
-    if not kf_crypto.verify_signature(msg_signature, timestamp, nonce, echostr):
-        return PlainTextResponse("invalid signature", status_code=403)
-    try:
-        plain = kf_crypto.decrypt(echostr)
-        return Response(content=plain, media_type="text/plain")
-    except Exception as e:
-        logger.exception("kf verify decrypt failed")
-        return PlainTextResponse(f"decrypt failed: {e}", status_code=400)
-
-
-@app.post("/wecom/kf/callback")
-async def wecom_kf_callback(request: Request, msg_signature: str, timestamp: str, nonce: str, background: BackgroundTasks):
-    if kf_crypto is None:
-        return PlainTextResponse("wecom kf not configured", status_code=500)
-    body = await request.body()
-    enc = parse_encrypted_xml(body)
-    if not kf_crypto.verify_signature(msg_signature, timestamp, nonce, enc.encrypt):
-        return PlainTextResponse("invalid signature", status_code=403)
-
-    plain_xml = kf_crypto.decrypt(enc.encrypt)
-    ev = parse_kf_event_xml(plain_xml)
-
-    # WeChat Customer Service new message notify: pull message content via sync_msg
-    if ev.msg_type == "event" and ev.event == "kf_msg_or_event" and ev.token and ev.open_kfid:
-        async def _pull_and_reply() -> None:
-            data = await kf_sync_msg(token=ev.token, cursor="", limit=50)
-            msgs = data.get("msg_list") or []
-            # reply to latest text message
-            for m in reversed(msgs):
-                if m.get("msgtype") == "text" and m.get("external_userid") and m.get("text", {}).get("content"):
-                    question = str(m["text"]["content"]).strip()
-                    if question:
-                        await _kf_answer_and_push(ev.open_kfid, m["external_userid"], question)
-                    break
-
-        background.add_task(asyncio.run, _pull_and_reply())
-
-    # For event callbacks, replying "success" is sufficient.
-    return PlainTextResponse("success")
 
 
 # ---------------- Admin (very small) ----------------
@@ -255,12 +326,9 @@ async def admin_home(_user: str = Depends(require_admin)):
     <div class="card">
       <div><a href="/admin/docs">知识库管理</a></div>
       <div><a href="/admin/chats">会话记录</a></div>
+      <div><a href="/admin/students">学生名录（小程序姓名匹配）</a></div>
+      <div><a href="/admin/binding-requests">待审核绑定</a></div>
       <div><a href="/admin/push">主动推送</a></div>
-      <div><a href="/admin/parents">家长通讯录（客户联系）</a></div>
-      <div><a href="/admin/bindings">家长-学生绑定</a></div>
-      <div><a href="/admin/binding-requests">待审批绑定请求</a></div>
-      <div><a href="/admin/students">学生五维数据</a></div>
-      <div><a href="/admin/reports">周报/群发</a></div>
     </div>
     """
     return html_page("Admin", body)
@@ -387,680 +455,36 @@ async def admin_push_post(
     return Response(status_code=303, headers={"Location": "/admin/push"})
 
 
-@app.get("/admin/parents", response_class=HTMLResponse)
-async def admin_parents(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
-    parents = db.query(ParentContact).order_by(ParentContact.updated_at.desc()).limit(200).all()
-    rows = "".join(
-        f"<tr><td>{p.external_userid[:10]}...</td><td>{p.name}</td><td>{p.remark}</td><td><code>{p.follow_userid}</code></td></tr>"
-        for p in parents
-    )
-    body = f"""
-    <h2>家长通讯录（客户联系）</h2>
-    <div class="card">
-      <form action="/admin/parents/sync" method="post">
-        <div style="margin-bottom:10px">
-          <label>跟进人 userid（sender）</label>
-          <input name="follow_userid" placeholder="例如：YangShengPin" value="{settings.wecom_external_sender_id}" />
-        </div>
-        <button type="submit">同步外部联系人</button>
-      </form>
-    </div>
-    <div class="card">
-      <table>
-        <thead><tr><th>external_userid</th><th>名称</th><th>备注</th><th>跟进人</th></tr></thead>
-        <tbody>{rows}</tbody>
-      </table>
-    </div>
-    <div><a href="/admin/">返回</a></div>
-    """
-    return html_page("Parents", body)
-
-
-@app.get("/admin/parents/sync-error", response_class=HTMLResponse)
-async def admin_parents_sync_error(msg: str = "", _user: str = Depends(require_admin)):
-    msg = (msg or "").strip()
-    body = f"""
-    <h2>同步外部联系人失败</h2>
-    <div class="card" style="white-space:pre-wrap">{msg or "未知错误"}</div>
-    <div><a href="/admin/parents">返回</a></div>
-    """
-    return html_page("Parents Sync Error", body)
-
-
-@app.post("/admin/parents/sync")
-async def admin_parents_sync(
-    follow_userid: str = Form(...),
-    db: Session = Depends(get_db),
-    _user: str = Depends(require_admin),
-):
-    follow_userid = follow_userid.strip()
-    try:
-        ids = await list_external_contacts(follow_userid)
-        for eid in ids:
-            info = await get_external_contact(eid)
-            ext = info.get("external_contact") or {}
-            name = ext.get("name") or ""
-            follow = (info.get("follow_user") or [{}])[0] if isinstance(info.get("follow_user"), list) else {}
-            remark = follow.get("remark") or ""
-
-            row = db.query(ParentContact).filter(ParentContact.external_userid == eid).one_or_none()
-            if row is None:
-                row = ParentContact(external_userid=eid, name=name, remark=remark, follow_userid=follow_userid)
-                db.add(row)
-            else:
-                row.name = name
-                row.remark = remark
-                row.follow_userid = follow_userid
-                row.updated_at = datetime.utcnow()
-        db.commit()
-        return Response(status_code=303, headers={"Location": "/admin/parents"})
-    except Exception as e:
-        return Response(status_code=303, headers={"Location": f"/admin/parents/sync-error?msg={str(e)}"})
-
-
-@app.get("/admin/bindings", response_class=HTMLResponse)
-async def admin_bindings(q: str = "", db: Session = Depends(get_db), _user: str = Depends(require_admin)):
-    q = (q or "").strip()
-    parents_q = db.query(ParentContact)
-    if q:
-        like = f"%{q}%"
-        parents_q = parents_q.filter((ParentContact.name.like(like)) | (ParentContact.remark.like(like)) | (ParentContact.external_userid.like(like)))
-    parents = parents_q.order_by(ParentContact.updated_at.desc()).limit(300).all()
-
-    # list existing bindings (latest first)
-    bindings = db.query(ParentStudentBinding).order_by(ParentStudentBinding.created_at.desc()).limit(500).all()
-    b_rows = "".join(
-        f"<tr><td>{b.id}</td><td>{b.parent.name}</td><td><code>{b.parent.external_userid[:10]}...</code></td>"
-        f"<td><code>{b.student_uid}</code></td><td>{b.created_at}</td>"
-        f"<td><form action='/admin/bindings/delete' method='post' style='margin:0'>"
-        f"<input type='hidden' name='binding_id' value='{b.id}'/>"
-        f"<button class='secondary' type='submit'>解绑</button></form></td></tr>"
-        for b in bindings
-    )
-
-    p_rows = ""
-    for p in parents:
-        p_rows += (
-            "<tr>"
-            f"<td>{p.name}</td>"
-            f"<td>{p.remark}</td>"
-            f"<td><code>{p.external_userid}</code></td>"
-            f"<td><code>{p.follow_userid}</code></td>"
-            "<td>"
-            "<form action='/admin/bindings/set' method='post' style='display:flex;gap:8px;align-items:center;margin:0'>"
-            f"<input type='hidden' name='external_userid' value='{p.external_userid}'/>"
-            "<input name='student_uid' placeholder='填学生UID(可多个家长绑定同一UID)' style='width:220px'/>"
-            "<button type='submit'>绑定</button>"
-            "</form>"
-            "</td>"
-            "</tr>"
-        )
-
-    body = f"""
-    <h2>家长-学生绑定</h2>
-    <div class="card">
-      <form method="get" action="/admin/bindings">
-        <div style="display:flex;gap:10px;align-items:center">
-          <input name="q" placeholder="按姓名/备注/external_userid 搜索" value="{q}" />
-          <button type="submit">搜索</button>
-          <a href="/admin/bindings" style="margin-left:6px">清空</a>
-        </div>
-      </form>
-      <div style="margin-top:10px;color:#666;font-size:12px">
-        说明：先在“家长通讯录”同步外部联系人，再在这里把家长绑定到 Hydro 学生 UID（支持一生多家长）。
-      </div>
-    </div>
-
-    <div class="card">
-      <h3 style="margin-top:0">新增绑定（从家长列表）</h3>
-      <table>
-        <thead><tr><th>家长名称</th><th>备注</th><th>external_userid</th><th>跟进人</th><th>绑定到学生UID</th></tr></thead>
-        <tbody>{p_rows}</tbody>
-      </table>
-    </div>
-
-    <div class="card">
-      <h3 style="margin-top:0">已有绑定（最多500条）</h3>
-      <table>
-        <thead><tr><th>ID</th><th>家长</th><th>external_userid</th><th>学生UID</th><th>时间</th><th>操作</th></tr></thead>
-        <tbody>{b_rows}</tbody>
-      </table>
-    </div>
-    <div><a href="/admin/">返回</a></div>
-    """
-    return html_page("Bindings", body)
-
-
-@app.post("/admin/bindings/set")
-async def admin_bindings_set(
-    external_userid: str = Form(...),
-    student_uid: str = Form(...),
-    db: Session = Depends(get_db),
-    _user: str = Depends(require_admin),
-):
-    external_userid = external_userid.strip()
-    student_uid = student_uid.strip()
-    if not external_userid or not student_uid:
-        raise HTTPException(status_code=400, detail="external_userid and student_uid required")
-
-    parent = db.query(ParentContact).filter(ParentContact.external_userid == external_userid).one_or_none()
-    if parent is None:
-        raise HTTPException(status_code=404, detail="parent not found, sync first")
-
-    exists = (
-        db.query(ParentStudentBinding)
-        .filter(ParentStudentBinding.parent_id == parent.id)
-        .filter(ParentStudentBinding.student_uid == student_uid)
-        .one_or_none()
-    )
-    if exists is None:
-        db.add(ParentStudentBinding(parent_id=parent.id, student_uid=student_uid))
-        db.commit()
-    return Response(status_code=303, headers={"Location": "/admin/bindings"})
-
-
-@app.post("/admin/bindings/delete")
-async def admin_bindings_delete(
-    binding_id: int = Form(...),
-    db: Session = Depends(get_db),
-    _user: str = Depends(require_admin),
-):
-    row = db.query(ParentStudentBinding).filter(ParentStudentBinding.id == binding_id).one_or_none()
-    if row is not None:
-        db.delete(row)
-        db.commit()
-    return Response(status_code=303, headers={"Location": "/admin/bindings"})
-
-
-class BindingRequestCreate(BaseModel):
-    external_userid: str
-    student_uid: str
-
-
-class ChatCreate(BaseModel):
-    external_userid: str
-    student_uid: str
-    message: str
-
-
-@app.get("/api/students/search")
-async def api_students_search(q: str = "", db: Session = Depends(get_db)):
-    q = (q or "").strip()
-    if not q:
-        return {"week_key": "", "results": []}
-    # Ensure cache is ready (Hydro refresh at most once per hour).
-    get_weekly_students(db, force_refresh=False)
-
-    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
-    week_key = latest[0] if latest else ""
-    rows_q = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == week_key)
-    like = f"%{q}%"
-    rows_q = rows_q.filter(
-        (StudentWeeklyMetric.student_uid.like(like)) | (StudentWeeklyMetric.name.like(like))
-    ).order_by(StudentWeeklyMetric.rank.asc()).limit(20)
-    rows = rows_q.all()
-    results = []
-    for r in rows:
-        try:
-            groups = _json.loads(r.groups_json or "[]")
-        except Exception:
-            groups = []
-        results.append(
-            {
-                "student_uid": r.student_uid,
-                "name": r.name,
-                "groups": groups,
-                "rank": r.rank,
-                "hw_done": r.hw_done,
-                "hw_total": r.hw_total,
-            }
-        )
-    return {"week_key": week_key, "results": results}
-
-
-@app.post("/api/binding-requests")
-async def api_create_binding_request(payload: BindingRequestCreate, db: Session = Depends(get_db)):
-    """
-    Parent submits binding request: (external_userid -> student_uid).
-    Teacher approval will turn it into ParentStudentBinding.
-    """
-    external_userid = payload.external_userid.strip()
-    student_uid = payload.student_uid.strip()
-    if not external_userid or not student_uid:
-        raise HTTPException(status_code=400, detail="external_userid and student_uid required")
-
-    # Validate external_userid exists in WeCom (cheap auth).
-    try:
-        await get_external_contact(external_userid)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"invalid external_userid: {e}")
-
-    # Prevent duplicate pending requests
-    parent = db.query(ParentContact).filter(ParentContact.external_userid == external_userid).one_or_none()
-    if parent is None:
-        # Parent must be synced first for binding approval flow.
-        raise HTTPException(status_code=404, detail="parent not synced. please visit /admin/parents sync first.")
-
-    existing_pending = (
-        db.query(BindingRequest)
-        .filter(BindingRequest.external_userid == external_userid)
-        .filter(BindingRequest.student_uid == student_uid)
-        .filter(BindingRequest.status == "pending")
-        .one_or_none()
-    )
-    if existing_pending is not None:
-        return {"request_id": existing_pending.id, "status": existing_pending.status}
-
-    # If already approved, treat as already bound.
-    approved = (
-        db.query(ParentStudentBinding)
-        .filter(ParentStudentBinding.parent_id == parent.id)
-        .filter(ParentStudentBinding.student_uid == student_uid)
-        .one_or_none()
-    )
-    if approved is not None:
-        return {"request_id": None, "status": "approved"}
-
-    row = BindingRequest(external_userid=external_userid, student_uid=student_uid, status="pending")
-    db.add(row)
-    db.commit()
-    return {"request_id": row.id, "status": row.status}
-
-
-@app.get("/api/binding-status")
-async def api_binding_status(external_userid: str = "", db: Session = Depends(get_db)):
-    external_userid = (external_userid or "").strip()
-    if not external_userid:
-        raise HTTPException(status_code=400, detail="external_userid required")
-    parent = db.query(ParentContact).filter(ParentContact.external_userid == external_userid).one_or_none()
-    if parent is None:
-        return {"approved_students": [], "pending_requests": []}
-
-    approved_students = [b.student_uid for b in db.query(ParentStudentBinding).filter(ParentStudentBinding.parent_id == parent.id).all()]
-    pending = db.query(BindingRequest).filter(BindingRequest.external_userid == external_userid).order_by(BindingRequest.created_at.desc()).limit(10).all()
-    return {
-        "approved_students": approved_students,
-        "pending_requests": [{"request_id": p.id, "student_uid": p.student_uid, "created_at": p.created_at.isoformat()} for p in pending],
-    }
-
-
-def _latest_week_key(db: Session) -> str:
-    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
-    return latest[0] if latest else ""
-
-
-async def answer_with_hydro_context_and_rag(
-    db: Session,
-    parent_key: str,
-    student_uid: str,
-    question: str,
-) -> dict:
-    """
-    Build LLM prompt with both:
-    - knowledge base (RAG via bm25 + stored chunks)
-    - student's Hydro weekly metrics snapshot (for factual questions)
-    """
-    # 1) get memory user
-    user = _get_or_create_user(db, parent_key)
-
-    # 2) memory
-    turns = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.user_id == user.id)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(settings.memory_max_turns * 2)
-        .all()
-    )
-    turns = list(reversed(turns))
-
-    # 3) rag
-    hits = (rindex.search(question, settings.rag_top_k) if rindex else [])
-    ctx_lines = []
-    for i, (_chunk_id, text, _score) in enumerate(hits, start=1):
-        ctx_lines.append(f"[{i}] {text.strip()}")
-    ctx = "\n\n".join(ctx_lines)
-
-    # 4) hydro metrics (weekly snapshot)
-    week_key = _latest_week_key(db)
-    m = (
-        db.query(StudentWeeklyMetric)
-        .filter(StudentWeeklyMetric.week_key == week_key)
-        .filter(StudentWeeklyMetric.student_uid == student_uid)
-        .one_or_none()
-    )
-    if m is None:
-        hydro_text = "（未找到该学生的周数据，请先管理员拉取本周数据）"
-    else:
-        try:
-            groups = _json.loads(m.groups_json or "[]")
-        except Exception:
-            groups = []
-        hydro_text = (
-            f"学生UID：{m.student_uid}\n"
-            f"姓名：{m.name}\n"
-            f"分组：{', '.join(groups) if groups else '-'}\n"
-            f"排名：第 {m.rank} 名\n"
-            f"作业：{m.hw_title}\n"
-            f"作业完成：{m.hw_done}/{m.hw_total}\n"
-            f"本周AC：{m.week_ac} 题；本周提交：{m.week_submits} 次\n"
-            f"活跃天数：{m.active_days} 天；最近活跃：{m.last_active}\n"
-            f"周Key：{week_key}"
-        )
-
-    system = (
-        "你是面向家长的学业咨询助手。\n"
-        "你必须优先使用【学生Hydro周数据】回答涉及作业完成、刷题数、活跃天数、排名等事实问题。\n"
-        "若使用了【知识库】信息，请在句末用 [1]/[2] 标注来源编号。\n"
-        "回答要简洁中文、结构清晰、必要时给出下一步建议。\n"
-    )
-    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
-    messages.append({"role": "system", "content": f"【学生Hydro周数据】\n{hydro_text}"})
-    if ctx:
-        messages.append({"role": "system", "content": f"【知识库】\n{ctx}"})
-
-    for t in turns:
-        if t.role in ("user", "assistant"):
-            messages.append({"role": t.role, "content": t.content})
-    messages.append({"role": "user", "content": question})
-
-    reply = await deepseek_chat(messages)
-
-    db.add(ChatMessage(user_id=user.id, role="user", content=question))
-    db.add(ChatMessage(user_id=user.id, role="assistant", content=reply))
-    db.commit()
-
-    return {"reply": reply, "week_key": week_key, "hydro_found": m is not None}
-
-
-@app.post("/api/chat")
-async def api_chat(payload: ChatCreate, db: Session = Depends(get_db)):
-    external_userid = payload.external_userid.strip()
-    student_uid = payload.student_uid.strip()
-    message = (payload.message or "").strip()
-    if not external_userid or not student_uid or not message:
-        raise HTTPException(status_code=400, detail="external_userid, student_uid, message required")
-
-    parent = db.query(ParentContact).filter(ParentContact.external_userid == external_userid).one_or_none()
-    if parent is None:
-        raise HTTPException(status_code=404, detail="parent not found, please sync first")
-
-    binding = (
-        db.query(ParentStudentBinding)
-        .filter(ParentStudentBinding.parent_id == parent.id)
-        .filter(ParentStudentBinding.student_uid == student_uid)
-        .one_or_none()
-    )
-    if binding is None:
-        raise HTTPException(status_code=403, detail="student not approved for this parent yet")
-
-    parent_key = f"parent:{external_userid}:student:{student_uid}"
-    res = await answer_with_hydro_context_and_rag(db, parent_key, student_uid, message)
-    return {"reply": res["reply"], "week_key": res["week_key"]}
-
-
-@app.get("/admin/binding-requests", response_class=HTMLResponse)
-async def admin_binding_requests(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
-    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
-    week_key = latest[0] if latest else ""
-    rows = (
-        db.query(BindingRequest)
-        .filter(BindingRequest.status == "pending")
-        .order_by(BindingRequest.created_at.desc())
-        .limit(200)
-        .all()
-    )
-    tr = ""
-    for r in rows:
-        student = (
-            db.query(StudentWeeklyMetric)
-            .filter(StudentWeeklyMetric.week_key == week_key)
-            .filter(StudentWeeklyMetric.student_uid == r.student_uid)
-            .one_or_none()
-        )
-        student_name = student.name if student else ""
-        tr += (
-            f"<tr><td>{r.id}</td>"
-            f"<td>{r.external_userid}</td>"
-            f"<td><code>{r.student_uid}</code></td>"
-            f"<td>{student_name}</td>"
-            f"<td>{r.created_at}</td>"
-            f"<td style='white-space:nowrap'>"
-            f"<form action='/admin/binding-requests/approve' method='post' style='display:inline'>"
-            f"<input type='hidden' name='request_id' value='{r.id}'/><button type='submit'>通过</button></form>"
-            f"<form action='/admin/binding-requests/reject' method='post' style='display:inline;margin-left:10px'>"
-            f"<input type='hidden' name='request_id' value='{r.id}'/><button class='secondary' type='submit'>拒绝</button></form>"
-            f"</td></tr>"
-        )
-
-    body = f"""
-    <h2>待审批的绑定请求</h2>
-    <div class="card">
-      <table>
-        <thead><tr><th>ID</th><th>external_userid</th><th>student_uid</th><th>学生姓名</th><th>时间</th><th>操作</th></tr></thead>
-        <tbody>{tr or "<tr><td colspan='6'>暂无待审批</td></tr>"}</tbody>
-      </table>
-    </div>
-    <div><a href="/admin/">返回</a></div>
-    """
-    return html_page("Binding Requests", body)
-
-
-@app.post("/admin/binding-requests/approve")
-async def admin_binding_requests_approve(request_id: int = Form(...), db: Session = Depends(get_db), _user: str = Depends(require_admin)):
-    row = db.query(BindingRequest).filter(BindingRequest.id == request_id).one_or_none()
-    if row is None or row.status != "pending":
-        raise HTTPException(status_code=404, detail="request not found or not pending")
-    parent = db.query(ParentContact).filter(ParentContact.external_userid == row.external_userid).one_or_none()
-    if parent is None:
-        raise HTTPException(status_code=400, detail="parent not synced")
-    row.status = "approved"
-    row.reviewed_at = datetime.utcnow()
-    row.reviewer = _user
-    # create binding if missing
-    exists = (
-        db.query(ParentStudentBinding)
-        .filter(ParentStudentBinding.parent_id == parent.id)
-        .filter(ParentStudentBinding.student_uid == row.student_uid)
-        .one_or_none()
-    )
-    if exists is None:
-        db.add(ParentStudentBinding(parent_id=parent.id, student_uid=row.student_uid))
-    db.commit()
-    return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
-
-
-@app.post("/admin/binding-requests/reject")
-async def admin_binding_requests_reject(request_id: int = Form(...), db: Session = Depends(get_db), _user: str = Depends(require_admin)):
-    row = db.query(BindingRequest).filter(BindingRequest.id == request_id).one_or_none()
-    if row is None or row.status != "pending":
-        raise HTTPException(status_code=404, detail="request not found or not pending")
-    row.status = "rejected"
-    row.reviewed_at = datetime.utcnow()
-    row.reviewer = _user
-    db.commit()
-    return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
-
-
-@app.get("/admin/reports", response_class=HTMLResponse)
-async def admin_reports(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
-    latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
-    latest_week = latest[0] if latest else ""
-    # quick list of groups from latest week (best-effort)
-    group_set: set[str] = set()
-    group_stats: dict[str, dict[str, int]] = {}
-    if latest_week:
-        rows = (
-            db.query(
-                StudentWeeklyMetric.student_uid,
-                StudentWeeklyMetric.groups_json,
-                StudentWeeklyMetric.hw_done,
-                StudentWeeklyMetric.hw_total,
-            )
-            .filter(StudentWeeklyMetric.week_key == latest_week)
-            .limit(5000)
-            .all()
-        )
-
-        # precompute which student_uids have at least one parent binding
-        bound_uids = {uid for (uid,) in db.query(ParentStudentBinding.student_uid).distinct().all()}
-
-        for uid, gj, hw_done, hw_total in rows:
-            try:
-                gs = [g.strip() for g in _json.loads(gj or "[]") if isinstance(g, str) and g.strip()]
-            except Exception:
-                gs = []
-            if not gs:
-                gs = ["(未分组)"]
-            for g in gs:
-                group_set.add(g)
-                st = group_stats.setdefault(g, {"students": 0, "bound_students": 0, "unfinished": 0})
-                st["students"] += 1
-                if str(uid) in bound_uids:
-                    st["bound_students"] += 1
-                if (hw_total or 0) > 0 and (hw_done or 0) < (hw_total or 0):
-                    st["unfinished"] += 1
-    group_options = "".join(f"<option value='{g}'></option>" for g in sorted(group_set))
-
-    # group stats table
-    stat_rows = ""
-    for g in sorted(group_stats.keys()):
-        st = group_stats[g]
-        stat_rows += (
-            f"<tr><td><code>{g}</code></td><td>{st['students']}</td><td>{st['bound_students']}</td><td>{st['unfinished']}</td>"
-            f"<td><a href='/admin/reports?week={latest_week}&group={g}'>选择该分组</a></td></tr>"
-        )
-
-    logs = db.query(ExternalSendLog).order_by(ExternalSendLog.created_at.desc()).limit(50).all()
-    log_rows = "".join(
-        f"<tr><td>{l.created_at}</td><td><code>{l.week_key}</code></td><td><code>{l.sender_userid}</code></td>"
-        f"<td>{l.group_filter or '-'}</td><td>{'是' if l.only_unfinished else '否'}</td>"
-        f"<td><code>{l.student_uid}</code></td><td><code>{l.external_userid[:10]}...</code></td>"
-        f"<td>{l.status}</td><td><code>{l.msgid}</code></td><td style='max-width:360px;white-space:pre-wrap'>{(l.error or '')[:120]}</td></tr>"
-        for l in logs
-    )
-
-    body = f"""
-    <h2>周报/群发</h2>
-    <div class="card">
-      <div style="color:#666;font-size:12px;margin-bottom:8px">
-        提示：先用下方“拉取本周数据（预览）”看筛选效果，再群发；也可以在下表点“选择该分组”快速填充筛选条件。
-      </div>
-      <table>
-        <thead><tr><th>分组/班级</th><th>学生数</th><th>已绑定学生数</th><th>未完成作业学生数</th><th>操作</th></tr></thead>
-        <tbody>{stat_rows or "<tr><td colspan='5'>暂无统计（请先拉取本周数据）</td></tr>"}</tbody>
-      </table>
-    </div>
-    <div class="card">
-      <form action="/admin/reports/weekly/preview" method="post">
-        <div style="margin-bottom:10px">
-          <label>跟进人 sender（用于客户联系群发）</label>
-          <input name="sender" value="{settings.wecom_external_sender_id}" placeholder="例如：YangShengPin" />
-        </div>
-        <div style="margin-bottom:10px">
-          <label>week_key（默认最新，例如：2026-W12）</label>
-          <input name="week" value="{latest_week}" />
-        </div>
-        <div style="margin-bottom:10px">
-          <label>分组/班级筛选（Hydro groups，留空表示全部）</label>
-          <input name="group" list="group_list" placeholder="例如：四班" />
-          <datalist id="group_list">{group_options}</datalist>
-        </div>
-        <div style="margin-bottom:10px">
-          <label><input type="checkbox" name="only_unfinished" /> 仅未完成作业（done &lt; total 且 total&gt;0）</label>
-        </div>
-        <button type="submit">拉取本周数据（预览）</button>
-      </form>
-    </div>
-    <div class="card">
-      <form action="/admin/reports/weekly/send" method="post">
-        <div style="margin-bottom:10px">
-          <label>跟进人 sender</label>
-          <input name="sender" value="{settings.wecom_external_sender_id}" placeholder="例如：YangShengPin" />
-        </div>
-        <div style="margin-bottom:10px">
-          <label>week_key</label>
-          <input name="week" value="{latest_week}" />
-        </div>
-        <div style="margin-bottom:10px">
-          <label>分组/班级筛选</label>
-          <input name="group" list="group_list" placeholder="例如：四班" />
-        </div>
-        <div style="margin-bottom:10px">
-          <label><input type="checkbox" name="only_unfinished" /> 仅未完成作业</label>
-        </div>
-        <button type="submit">一键群发本周周报（按绑定关系）</button>
-      </form>
-      <div style="margin-top:8px;color:#666;font-size:12px">
-        注：群发会对每个已绑定家长创建一条 externalcontact 群发任务，并记录结果到“最近发送记录”。
-      </div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">最近发送记录（最多50条）</h3>
-      <table>
-        <thead><tr>
-          <th>时间</th><th>周</th><th>sender</th><th>分组</th><th>仅未完成</th>
-          <th>UID</th><th>external_userid</th><th>状态</th><th>msgid</th><th>错误</th>
-        </tr></thead>
-        <tbody>{log_rows}</tbody>
-      </table>
-    </div>
-    <div><a href="/admin/">返回</a></div>
-    """
-    return html_page("Reports", body)
-
-
 @app.get("/admin/students", response_class=HTMLResponse)
-async def admin_students(week: str = "", q: str = "", db: Session = Depends(get_db), _user: str = Depends(require_admin)):
-    week = (week or "").strip()
-    q = (q or "").strip()
-
-    # default to latest week_key
-    if not week:
-        latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
-        week = latest[0] if latest else ""
-
-    rows_q = db.query(StudentWeeklyMetric)
-    if week:
-        rows_q = rows_q.filter(StudentWeeklyMetric.week_key == week)
-    if q:
-        like = f"%{q}%"
-        rows_q = rows_q.filter((StudentWeeklyMetric.student_uid.like(like)) | (StudentWeeklyMetric.name.like(like)))
-    rows = rows_q.order_by(StudentWeeklyMetric.rank.asc()).limit(500).all()
-
-    tr = ""
-    for r in rows:
-        try:
-            groups = ", ".join(_json.loads(r.groups_json or "[]"))
-        except Exception:
-            groups = ""
-        tr += (
-            f"<tr><td><code>{r.student_uid}</code></td><td>{r.name}</td><td>{r.rank}</td>"
-            f"<td>{groups}</td><td>{r.hw_title}</td><td>{r.hw_done}/{r.hw_total}</td>"
-            f"<td>{r.week_ac}</td><td>{r.week_submits}</td><td>{r.active_days}</td><td>{r.last_active}</td></tr>"
-        )
-
+async def admin_students(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    students = db.query(StudentRecord).order_by(StudentRecord.id.desc()).limit(500).all()
+    rows = "".join(
+        f"<tr><td>{s.id}</td><td><code>{html.escape(s.student_uid)}</code></td>"
+        f"<td>{html.escape(s.display_name)}</td><td><code>{html.escape(s.name_key)}</code></td>"
+        f"<td>{s.created_at}</td></tr>"
+        for s in students
+    )
     body = f"""
-    <h2>学生五维数据（按周）</h2>
+    <h2>学生名录</h2>
+    <p>小程序家长发送<strong>孩子姓名</strong>时，会与这里的<strong>规范化姓名</strong>（去空白）做<strong>精确匹配</strong>。
+    多条同名会进入「待审核绑定」。</p>
     <div class="card">
-      <form method="get" action="/admin/students">
-        <div style="display:flex;gap:10px;align-items:center">
-          <input name="week" placeholder="例如：2026-W12" value="{week}" style="width:180px" />
-          <input name="q" placeholder="按UID/姓名搜索" value="{q}" />
-          <button type="submit">查询</button>
-          <a href="/admin/students" style="margin-left:6px">最新</a>
+      <form action="/admin/students/add" method="post">
+        <div style="margin-bottom:10px">
+          <label>student_uid（Hydro UID 或业务唯一 ID）</label>
+          <input name="student_uid" required placeholder="例如 1001" />
         </div>
+        <div style="margin-bottom:10px">
+          <label>姓名（显示名，匹配时会去掉所有空白）</label>
+          <input name="display_name" required placeholder="例如 张 睿 宸" />
+        </div>
+        <button type="submit">添加</button>
       </form>
-      <div style="margin-top:10px;color:#666;font-size:12px">
-        数据来源：Hydro 周数据拉取。每次你点击“周报预览/群发”都会刷新并写入这一周数据；后续会改成每周一自动更新。
-      </div>
     </div>
     <div class="card">
       <table>
-        <thead><tr>
-          <th>UID</th><th>姓名</th><th>排名</th><th>分组</th><th>作业</th><th>作业进度</th>
-          <th>本周AC</th><th>本周提交</th><th>活跃天数</th><th>最近活跃</th>
-        </tr></thead>
-        <tbody>{tr}</tbody>
+        <thead><tr><th>ID</th><th>student_uid</th><th>姓名</th><th>name_key</th><th>时间</th></tr></thead>
+        <tbody>{rows}</tbody>
       </table>
     </div>
     <div><a href="/admin/">返回</a></div>
@@ -1068,178 +492,97 @@ async def admin_students(week: str = "", q: str = "", db: Session = Depends(get_
     return html_page("Students", body)
 
 
-@app.post("/admin/reports/weekly/preview", response_class=HTMLResponse)
-async def admin_weekly_preview(
-    sender: str = Form(""),
-    week: str = Form(""),
-    group: str = Form(""),
-    only_unfinished: str = Form(""),
+@app.post("/admin/students/add")
+async def admin_students_add(
+    student_uid: str = Form(...),
+    display_name: str = Form(...),
     db: Session = Depends(get_db),
     _user: str = Depends(require_admin),
 ):
-    sender = (sender or "").strip() or (settings.wecom_external_sender_id or "").strip()
-    week = (week or "").strip()
-    group = (group or "").strip()
-    only_unfinished_bool = bool(only_unfinished)
-
-    # refresh from hydro and persist weekly metrics
-    get_weekly_students(db, force_refresh=True)
-
-    if not week:
-        latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
-        week = latest[0] if latest else ""
-
-    rows_q = db.query(StudentWeeklyMetric)
-    if week:
-        rows_q = rows_q.filter(StudentWeeklyMetric.week_key == week)
-    rows = rows_q.order_by(StudentWeeklyMetric.rank.asc()).all()
-
-    filtered: list[StudentWeeklyMetric] = []
-    for r in rows:
-        if group:
-            try:
-                gs = _json.loads(r.groups_json or "[]")
-                if group not in gs:
-                    continue
-            except Exception:
-                continue
-        if only_unfinished_bool and (r.hw_total <= 0 or r.hw_done >= r.hw_total):
-            continue
-        filtered.append(r)
-
-    body_rows = ""
-    for r in filtered[:80]:
-        body_rows += f"<tr><td><code>{r.student_uid}</code></td><td>{r.name}</td><td>{r.rank}</td><td>{r.hw_done}/{r.hw_total}</td><td>{r.week_ac}</td><td>{r.active_days}</td></tr>"
-
-    bindings = db.query(ParentStudentBinding).all()
-    uid_has_parent = {b.student_uid for b in bindings}
-    will_send_students = [r for r in filtered if r.student_uid in uid_has_parent]
-    will_send_parents = sum(1 for b in bindings if any(r.student_uid == b.student_uid for r in will_send_students))
-
-    body = f"""
-    <h2>本周数据预览（前50）</h2>
-    <div class="card">
-      <div><code>sender={sender}</code></div>
-      <div><code>week={week or '-'}</code> <code>group={group or '-'}</code> <code>only_unfinished={'1' if only_unfinished_bool else '0'}</code></div>
-      <div style="margin-top:6px;color:#666;font-size:12px">
-        筛选后学生数：<b>{len(filtered)}</b>；其中已绑定可发送学生数：<b>{len(will_send_students)}</b>；预计发送家长数（按绑定条数）：<b>{will_send_parents}</b>
-      </div>
-    </div>
-    <div class="card">
-      <table>
-        <thead><tr><th>UID</th><th>姓名</th><th>排名</th><th>作业</th><th>本周AC</th><th>活跃天数</th></tr></thead>
-        <tbody>{body_rows}</tbody>
-      </table>
-    </div>
-    <div><a href="/admin/reports">返回</a></div>
-    """
-    return html_page("Weekly Preview", body)
+    uid = student_uid.strip()
+    dn = display_name.strip()
+    nk = _norm_student_name(dn)
+    if not uid or not nk:
+        return Response(status_code=303, headers={"Location": "/admin/students"})
+    ex = db.query(StudentRecord).filter(StudentRecord.student_uid == uid).one_or_none()
+    if ex:
+        ex.display_name = dn
+        ex.name_key = nk
+    else:
+        db.add(StudentRecord(student_uid=uid, display_name=dn, name_key=nk))
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/students"})
 
 
-@app.post("/admin/reports/weekly/send", response_class=HTMLResponse)
-async def admin_weekly_send(
-    sender: str = Form(""),
-    week: str = Form(""),
-    group: str = Form(""),
-    only_unfinished: str = Form(""),
-    db: Session = Depends(get_db),
-    _user: str = Depends(require_admin),
-):
-    sender = (sender or "").strip() or (settings.wecom_external_sender_id or "").strip()
-    if not sender:
-        raise HTTPException(status_code=400, detail="sender required (set WECOM_EXTERNAL_SENDER_ID or fill the form)")
-
-    week = (week or "").strip()
-    group = (group or "").strip()
-    only_unfinished_bool = bool(only_unfinished)
-
-    # refresh from hydro and persist weekly metrics
-    weekly = get_weekly_students(db, force_refresh=True)
-    # infer week key if not provided
-    if not week:
-        latest = db.query(StudentWeeklyMetric.week_key).order_by(StudentWeeklyMetric.week_key.desc()).first()
-        week = latest[0] if latest else ""
-
-    # build dict for report rendering from raw hydro payload (keeps existing format)
-    by_uid = {str(s.get("uid")): s for s in weekly if s.get("uid") is not None}
-
-    bindings = db.query(ParentStudentBinding).all()
-    ok = 0
-    fail = 0
-    errs: list[str] = []
-    for b in bindings:
-        s_raw = by_uid.get(b.student_uid)
-        if not s_raw:
-            continue
-
-        # apply filters using metrics table (more reliable)
-        m = (
-            db.query(StudentWeeklyMetric)
-            .filter(StudentWeeklyMetric.week_key == week)
-            .filter(StudentWeeklyMetric.student_uid == b.student_uid)
-            .one_or_none()
-        )
-        if m is None:
-            continue
-        if group:
-            try:
-                gs = _json.loads(m.groups_json or "[]")
-                if group not in gs:
-                    continue
-            except Exception:
-                continue
-        if only_unfinished_bool and (m.hw_total <= 0 or m.hw_done >= m.hw_total):
-            continue
-
-        content = render_weekly_report(s_raw)
+@app.get("/admin/binding-requests", response_class=HTMLResponse)
+async def admin_binding_requests(db: Session = Depends(get_db), _user: str = Depends(require_admin)):
+    reqs = db.query(BindingNameRequest).order_by(BindingNameRequest.id.desc()).limit(200).all()
+    blocks = []
+    for br in reqs:
         try:
-            resp = await add_msg_template_single(external_userid=b.parent.external_userid, content=content, sender_userid=sender)
-            db.add(
-                ExternalSendLog(
-                    week_key=week,
-                    sender_userid=sender,
-                    group_filter=group,
-                    only_unfinished=1 if only_unfinished_bool else 0,
-                    student_uid=b.student_uid,
-                    external_userid=b.parent.external_userid,
-                    status="ok",
-                    msgid=str(resp.get("msgid") or resp.get("msg_id") or ""),
-                    response_json=_json.dumps(resp, ensure_ascii=False),
-                    error="",
-                )
-            )
-            db.commit()
-            ok += 1
-        except Exception as e:
-            db.add(
-                ExternalSendLog(
-                    week_key=week,
-                    sender_userid=sender,
-                    group_filter=group,
-                    only_unfinished=1 if only_unfinished_bool else 0,
-                    student_uid=b.student_uid,
-                    external_userid=b.parent.external_userid,
-                    status="fail",
-                    msgid="",
-                    response_json="",
-                    error=str(e),
-                )
-            )
-            db.commit()
-            fail += 1
-            errs.append(f"{b.parent.external_userid[:10]}... uid={b.student_uid}: {e}")
-
-    err_html = "<br/>".join(errs[:20])
+            cand = json.loads(br.candidates_json or "[]")
+        except json.JSONDecodeError:
+            cand = []
+        cand_opts = "".join(
+            f'<option value="{html.escape(c, quote=True)}">{html.escape(c)}</option>' for c in cand
+        )
+        st = html.escape(br.status)
+        resolve_form = ""
+        if br.status == "pending" and cand:
+            resolve_form = f"""
+              <form action="/admin/binding-requests/resolve" method="post" style="margin-top:10px">
+                <input type="hidden" name="request_id" value="{br.id}" />
+                <label>选择正确 student_uid</label>
+                <select name="student_uid">{cand_opts}</select>
+                <button type="submit" style="margin-left:8px">通过并绑定</button>
+              </form>
+            """
+        blocks.append(
+            f"""
+            <div class="card">
+              <div><strong>#{br.id}</strong> 状态：<code>{st}</code> 时间：{br.created_at}</div>
+              <div>openid：<code>{html.escape(br.openid)}</code></div>
+              <div>提交姓名：{html.escape(br.student_name_submitted)}</div>
+              <div>候选 UID：{html.escape(json.dumps(cand, ensure_ascii=False))}</div>
+              {resolve_form}
+            </div>
+            """
+        )
     body = f"""
-    <h2>周报群发完成</h2>
-    <div class="card">
-      成功：<b>{ok}</b>，失败：<b>{fail}</b>
-    </div>
-    <div class="card">
-      <div style="color:#666">失败示例（最多20条）</div>
-      <div style="white-space:pre-wrap">{err_html or "无"}</div>
-    </div>
-    <div><a href="/admin/reports">返回</a></div>
+    <h2>待审核绑定（姓名多条匹配）</h2>
+    <p>审核通过后，会为该 openid 写入 <code>parent_student_bindings</code>。</p>
+    {"".join(blocks) if blocks else "<p>暂无记录。</p>"}
+    <div><a href="/admin/">返回</a></div>
     """
-    return html_page("Weekly Send", body)
+    return html_page("Binding requests", body)
+
+
+@app.post("/admin/binding-requests/resolve")
+async def admin_binding_requests_resolve(
+    request_id: int = Form(...),
+    student_uid: str = Form(...),
+    db: Session = Depends(get_db),
+    _user: str = Depends(require_admin),
+):
+    br = db.query(BindingNameRequest).filter(BindingNameRequest.id == request_id).one_or_none()
+    if not br:
+        return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
+    try:
+        cand = json.loads(br.candidates_json or "[]")
+    except json.JSONDecodeError:
+        cand = []
+    su = student_uid.strip()
+    if su not in cand:
+        return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
+    br.status = "approved"
+    br.resolved_student_uid = su
+    exb = (
+        db.query(ParentStudentBinding)
+        .filter(ParentStudentBinding.openid == br.openid, ParentStudentBinding.student_uid == su)
+        .one_or_none()
+    )
+    if not exb:
+        db.add(ParentStudentBinding(openid=br.openid, student_uid=su))
+    db.commit()
+    return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
 
