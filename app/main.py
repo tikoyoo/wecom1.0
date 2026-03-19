@@ -436,6 +436,14 @@ async def _parse_operator_intent(text: str) -> dict[str, object]:
     }
 
 
+def _looks_like_operator_command(cmd: str) -> bool:
+    s = (cmd or "").strip()
+    if not s:
+        return False
+    # 强约束：仅 #s 开头视为运维指令（例如：#s 统计今天CSP-J4班做题数据）
+    return bool(re.match(r"^\s*#s(\s+|$)", s, flags=re.IGNORECASE))
+
+
 async def _weekly_scheduler_loop() -> None:
     while True:
         try:
@@ -648,10 +656,10 @@ async def _handle_operator_ai_command(db: Session, operator_id: str, text: str) 
     cmd = (text or "").strip()
     if not cmd:
         return None
-    # 仅处理显式运维口令，避免影响普通咨询对话。
-    if ("Hi bot" not in cmd) and (not cmd.startswith(("发送", "统计"))):
+    # 仅处理 #s 开头的显式运维口令，避免影响普通咨询对话。
+    if not _looks_like_operator_command(cmd):
         return None
-    clean = re.sub(r"^\s*Hi bot[,，:\s]*", "", cmd, flags=re.IGNORECASE).strip() or cmd
+    clean = re.sub(r"^\s*#s[\s,，:：-]*", "", cmd, flags=re.IGNORECASE).strip() or cmd
 
     sender_userid = (settings.wecom_external_sender_id or "").strip() or operator_id
     try:
