@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from string import Formatter
 
 from sqlalchemy.orm import Session
 
@@ -12,20 +13,44 @@ from .hydro_service import get_weekly_students
 from .wecom_external_api import add_msg_template_single
 
 
-def render_weekly_report(raw: dict) -> str:
+def _safe_format(template: str, ctx: dict[str, object]) -> str:
+    # Ignore unknown placeholders to avoid send failures from template typos.
+    fields = {name for _, name, _, _ in Formatter().parse(template) if name}
+    for k in fields:
+        if k not in ctx:
+            ctx[k] = ""
+    return template.format(**ctx)
+
+
+def render_weekly_report(raw: dict, template_text: str = "") -> str:
     hw = raw.get("hw_info") or {}
     dim2 = raw.get("dim2") or {}
     dim3 = raw.get("dim3") or {}
+    ctx: dict[str, object] = {
+        "name": raw.get("name", ""),
+        "uid": raw.get("uid", ""),
+        "rank": raw.get("rank", "-"),
+        "hw_title": hw.get("title", "无"),
+        "hw_done": hw.get("done", 0),
+        "hw_total": hw.get("total", 0),
+        "week_ac": dim2.get("ac", 0),
+        "week_submits": dim2.get("submits", 0),
+        "active_days": dim3.get("days", 0),
+        "last_active": dim3.get("last", "无"),
+        "groups": "、".join([str(x) for x in (raw.get("groups") or []) if str(x).strip()]),
+    }
+    if template_text.strip():
+        return _safe_format(template_text, ctx)
     return (
-        f"📊 {raw.get('name','')} 的学习周报\n\n"
-        f"👤 HYDRO ID：{raw.get('uid')}\n"
-        f"📈 当前排名：第 {raw.get('rank','-')} 名\n\n"
-        f"📚 本周作业：{hw.get('title','无')}\n"
-        f"✅ 完成情况：{hw.get('done',0)}/{hw.get('total',0)}\n\n"
-        f"💡 本周AC：{dim2.get('ac',0)} 题\n"
-        f"📝 本周提交：{dim2.get('submits',0)} 次\n"
-        f"🔥 活跃天数：{dim3.get('days',0)} 天（最近：{dim3.get('last','无')}）\n\n"
-        f"如需辅导建议，请直接回复本消息。"
+        f"📊 {ctx['name']} 的学习周报\n\n"
+        f"👤 HYDRO ID：{ctx['uid']}\n"
+        f"📈 当前排名：第 {ctx['rank']} 名\n\n"
+        f"📚 本周作业：{ctx['hw_title']}\n"
+        f"✅ 完成情况：{ctx['hw_done']}/{ctx['hw_total']}\n\n"
+        f"💡 本周AC：{ctx['week_ac']} 题\n"
+        f"📝 本周提交：{ctx['week_submits']} 次\n"
+        f"🔥 活跃天数：{ctx['active_days']} 天（最近：{ctx['last_active']}）\n\n"
+        "如需辅导建议，请直接回复本消息。"
     )
 
 
@@ -65,6 +90,7 @@ async def send_weekly_reports(
     group: str = "",
     only_unfinished: bool = False,
     force_refresh: bool = True,
+    template_text: str = "",
 ) -> WeeklySendResult:
     sender = (sender or "").strip() or (settings.wecom_external_sender_id or "").strip()
     if not sender:
@@ -119,7 +145,7 @@ async def send_weekly_reports(
             skip += 1
             continue
 
-        content = render_weekly_report(raw)
+        content = render_weekly_report(raw, template_text=template_text)
         try:
             resp = await add_msg_template_single(external_userid=ext, content=content, sender_userid=sender)
             db.add(
