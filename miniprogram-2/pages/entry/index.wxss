@@ -1,0 +1,21 @@
+.page{
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+}
+.card{
+  text-align: center;
+}
+.title{
+  font-size: 16px;
+  color: #111;
+  display: block;
+  margin-bottom: 6px;
+}
+.sub{
+  font-size: 12px;
+  color: #666;
+}
+
