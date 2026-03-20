@@ -53,6 +53,7 @@ crypto: WeComCrypto | None = None
 
 rindex: RagIndex | None = None
 weekly_scheduler_task: asyncio.Task | None = None
+daily_weekly_updates_task: asyncio.Task | None = None
 WECOM_REPLY_MAX_CHARS = 1800
 
 # 企业微信被动回复超时后会用相同 MsgId 重试回调，导致 #s / 周报发送 等副作用执行多次。
@@ -188,11 +189,19 @@ async def lifespan(app: FastAPI):
         )
     global weekly_scheduler_task
     weekly_scheduler_task = asyncio.create_task(_weekly_scheduler_loop())
+    global daily_weekly_updates_task
+    daily_weekly_updates_task = asyncio.create_task(_daily_weekly_updates_loop())
     yield
     if weekly_scheduler_task:
         weekly_scheduler_task.cancel()
         try:
             await weekly_scheduler_task
+        except asyncio.CancelledError:
+            pass
+    if daily_weekly_updates_task:
+        daily_weekly_updates_task.cancel()
+        try:
+            await daily_weekly_updates_task
         except asyncio.CancelledError:
             pass
 
@@ -311,6 +320,73 @@ def _save_weekly_schedule(data: dict[str, object]) -> None:
     fp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _daily_weekly_updates_schedule_file() -> Path:
+    p = Path(settings.data_dir) / "daily_weekly_updates_schedule.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _load_daily_weekly_updates_schedule() -> dict[str, object]:
+    fp = _daily_weekly_updates_schedule_file()
+    if not fp.exists():
+        return {
+            "enabled": True,
+            "time_hhmm": "02:00",
+            "last_run_date": "",
+        }
+    try:
+        data = json.loads(fp.read_text(encoding="utf-8"))
+        return {
+            "enabled": bool(data.get("enabled", True)),
+            "time_hhmm": str(data.get("time_hhmm") or "02:00"),
+            "last_run_date": str(data.get("last_run_date") or ""),
+        }
+    except Exception:
+        return {
+            "enabled": True,
+            "time_hhmm": "02:00",
+            "last_run_date": "",
+        }
+
+
+def _save_daily_weekly_updates_schedule(data: dict[str, object]) -> None:
+    fp = _daily_weekly_updates_schedule_file()
+    fp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+async def _daily_weekly_updates_loop() -> None:
+    """每天 02:00 从 Hydro 刷新周数据并生成“带日期后缀”的学生更新文件。"""
+    while True:
+        try:
+            sch = _load_daily_weekly_updates_schedule()
+            if not sch.get("enabled"):
+                await asyncio.sleep(30)
+                continue
+            hhmm = str(sch.get("time_hhmm") or "02:00")
+            now = datetime.now()
+            now_hhmm = now.strftime("%H:%M")
+            today = now.strftime("%Y-%m-%d")
+            if now_hhmm == hhmm and str(sch.get("last_run_date") or "") != today:
+                with next(get_db()) as db:  # type: ignore[arg-type]
+                    # 刷新 Hydro 周指标并落盘快照
+                    try:
+                        get_weekly_students(db, force_refresh=True)
+                    except Exception:
+                        logger.exception("daily weekly updates hydro refresh failed")
+                    wk = _latest_week_key(db)
+                    if wk:
+                        _dump_weekly_snapshot_file_with_suffix(db, wk, suffix_date=today)
+                        logger.info("daily weekly updates generated file week=%s date=%s", wk, today)
+                sch["last_run_date"] = today
+                _save_daily_weekly_updates_schedule(sch)
+            await asyncio.sleep(20)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("daily weekly updates loop error")
+            await asyncio.sleep(30)
+
+
 def _parse_op_ids() -> set[str]:
     raw = (settings.wecom_weekly_operator_ids or "").strip()
     if not raw:
@@ -404,6 +480,56 @@ def _summarize_today_stats(today_rows: list[dict], group: str = "") -> str:
     )
 
 
+def _format_today_group_table(today_rows: list[dict], group: str) -> str:
+    filt: list[dict] = []
+    for r in today_rows:
+        gs = [str(x) for x in (r.get("groups") or [])]
+        if group and group not in gs:
+            continue
+        filt.append(r)
+
+    if not filt:
+        return f"今天未找到班级={group}的学生数据。"
+
+    # Sort to match your screenshot style: by rank asc, then today_ac desc.
+    def _key(x: dict) -> tuple[int, int, int]:
+        try:
+            rank = int(x.get("rank") or 999)
+        except Exception:
+            rank = 999
+        try:
+            ac = int(x.get("today_ac") or 0)
+        except Exception:
+            ac = 0
+        try:
+            sub = int(x.get("today_submits") or 0)
+        except Exception:
+            sub = 0
+        return (rank, -ac, -sub)
+
+    filt.sort(key=_key)
+    # Avoid huge payloads.
+    max_rows = 40
+    shown = filt[:max_rows]
+    total = len(filt)
+
+    header = "学生UID | 姓名 | 排名 | 今日提交数 | 今日AC数 | 活跃天数 | 最后活跃时间"
+    lines = [header]
+    for r in shown:
+        uid = str(r.get("uid") or "")
+        name = str(r.get("name") or "")
+        rank = int(r.get("rank") or 999)
+        today_submits = int(r.get("today_submits") or 0)
+        today_ac = int(r.get("today_ac") or 0)
+        active_days = int(r.get("active_days") or 0)
+        last_active = str(r.get("last_active_date") or "")
+        lines.append(f"{uid} | {name} | {rank} | {today_submits} | {today_ac} | {active_days} | {last_active}")
+
+    if total > max_rows:
+        lines.append(f"... 共{total}人，已截断展示前{max_rows}人")
+    return "\n".join(lines)
+
+
 async def _send_custom_message_to_scope(
     db: Session,
     *,
@@ -454,6 +580,20 @@ async def _send_custom_message_to_scope(
 
 async def _parse_operator_intent(text: str) -> dict[str, object]:
     raw = (text or "").strip()
+    # A) 今天班级ID：xxxx班级的做题数据给我（直接输出表格，不走 AI）
+    m = re.search(
+        r"今天.*班级ID\s*[:：]\s*([A-Za-z0-9_-]+)\s*班级.*?(做题|题目|提交|AC|数据)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return {
+            "action": "stats_today_group_table",
+            "scope": "group",
+            "student_uid": "",
+            "group": m.group(1),
+            "message": "",
+        }
     # Rule-first parsing for high-frequency command patterns.
     # 1) send weekly to one student
     m = re.search(r"(发送|推送).*(周报|五维).*(学生\s*ID|ID)\s*[:：]?\s*([A-Za-z0-9_-]+)", raw, flags=re.IGNORECASE)
@@ -511,7 +651,7 @@ async def _parse_operator_intent(text: str) -> dict[str, object]:
             "content": (
                 "你是企业微信运营指令解析器。请把用户命令解析成 JSON，不要输出其它文字。\n"
                 "字段：action, scope, student_uid, group, message。\n"
-                "action 只允许：send_weekly, send_custom, send_today_student, stats_weekly, stats_today, stats_today_student。\n"
+                "action 只允许：send_weekly, send_custom, send_today_student, stats_weekly, stats_today, stats_today_student, stats_today_group_table。\n"
                 "scope 只允许：all, group, student, me。\n"
                 "无法确定时：action=unknown，scope=all。"
             ),
@@ -617,6 +757,44 @@ def _dump_weekly_snapshot_file(db: Session, week_key: str) -> dict[str, object]:
             }
         )
     name = f"{wk}.json"
+    out = _weekly_updates_dir() / name
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"week_key": wk, "rows": len(payload), "filename": name}
+
+
+def _dump_weekly_snapshot_file_with_suffix(db: Session, week_key: str, suffix_date: str) -> dict[str, object]:
+    """和 _dump_weekly_snapshot_file 类似，但文件名带日期后缀，避免同一周覆盖。"""
+    wk = (week_key or "").strip()
+    sd = (suffix_date or "").strip()
+    if not wk:
+        return {"week_key": "", "rows": 0, "filename": ""}
+
+    rows = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == wk).all()
+    payload: list[dict[str, object]] = []
+    for r in rows:
+        try:
+            groups = json.loads(r.groups_json or "[]")
+        except json.JSONDecodeError:
+            groups = []
+        payload.append(
+            {
+                "week_key": r.week_key,
+                "student_uid": r.student_uid,
+                "name": r.name,
+                "rank": r.rank,
+                "groups": groups,
+                "hw_title": r.hw_title,
+                "hw_done": r.hw_done,
+                "hw_total": r.hw_total,
+                "week_submits": r.week_submits,
+                "week_ac": r.week_ac,
+                "active_days": r.active_days,
+                "last_active": r.last_active,
+                "updated_at": str(r.updated_at),
+            }
+        )
+
+    name = f"{wk}_{sd}.json" if sd else f"{wk}.json"
     out = _weekly_updates_dir() / name
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"week_key": wk, "rows": len(payload), "filename": name}
@@ -856,6 +1034,10 @@ async def _handle_operator_ai_command(db: Session, operator_id: str, text: str) 
     if action == "stats_today":
         today = get_today_students_stats()
         return _summarize_today_stats(today, group=gp if scope == "group" else "")
+
+    if action == "stats_today_group_table" and gp:
+        today = get_today_students_stats()
+        return _format_today_group_table(today, group=gp)
 
     if action == "stats_today_student" and su:
         today = get_today_students_stats()
@@ -1510,8 +1692,12 @@ async def admin_weekly_files(db: Session = Depends(get_db), _user: str = Depends
 
     files = sorted(_weekly_updates_dir().glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)
     rows = "".join(
-        f"<tr><td><code>{html.escape(f.name)}</code></td><td>{f.stat().st_size}</td>"
-        f"<td><a href='/admin/weekly-files/download?name={html.escape(f.name, quote=True)}'>下载</a></td></tr>"
+        f"<tr>"
+        f"<td><code>{html.escape(f.name)}</code></td>"
+        f"<td>{f.stat().st_size}</td>"
+        f"<td>{datetime.fromtimestamp(f.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')}</td>"
+        f"<td><a href='/admin/weekly-files/download?name={html.escape(f.name, quote=True)}'>下载</a></td>"
+        f"</tr>"
         for f in files[:100]
     )
     body = f"""
@@ -1538,7 +1724,7 @@ async def admin_weekly_files(db: Session = Depends(get_db), _user: str = Depends
     </div>
     <div class="card">
       <table>
-        <thead><tr><th>文件名</th><th>大小(bytes)</th><th>操作</th></tr></thead>
+        <thead><tr><th>文件名</th><th>大小(bytes)</th><th>更新时间</th><th>操作</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>

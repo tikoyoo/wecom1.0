@@ -102,12 +102,17 @@ HYDRO_TODAY_JS = r"""
 try {
  const domain = 'system';
  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth() + 1;
+  const d = now.getDate();
+  const todayStr = `${y}/${m}/${d}`;
  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
  const dayObjId = ObjectId(Math.floor(dayStart/1000).toString(16) + "0000000000000000");
 
  const users = db['domain.user'].find({ domainId: domain, nAccept: { $gt: 0 } }).toArray();
  const results = users.map(u => {
    const uid = u.uid;
+    const rank = u.rank || 999;
    const groups = db['user.group'].find({ domainId: domain, uids: uid }).toArray().map(g => g.name);
    const records = db.record.find({
      uid: uid,
@@ -120,12 +125,19 @@ try {
      status: 1,
      _id: { $gt: dayObjId }
    });
+    const todaySubmits = records.length;
+    const todayAc = acPids.length;
+    const activeDays = todaySubmits > 0 ? 1 : 0;
+    const lastActive = todaySubmits > 0 ? todayStr : "无";
    return {
      uid: uid,
      name: u.displayName || "未知",
      groups: groups,
-     today_submits: records.length,
-     today_ac: acPids.length
+      rank: rank,
+      today_submits: todaySubmits,
+      today_ac: todayAc,
+      active_days: activeDays,
+      last_active_date: lastActive
    };
  });
 
