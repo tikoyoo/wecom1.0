@@ -1,15 +1,8 @@
 {
-  "pages": ["pages/entry/index"],
+  "pages": ["pages/entry/index", "pages/chat/index"],
   "usingComponents": {
     "t-toast": "tdesign-miniprogram/toast/toast"
   },
-  "subpackages": [
-    {
-      "root": "pages/chat",
-      "name": "chat",
-      "pages": ["index"]
-    }
-  ],
   "window": {
     "backgroundTextStyle": "light",
     "navigationBarBackgroundColor": "#fff",

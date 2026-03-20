@@ -5,6 +5,7 @@ import html
 import json
 import logging
 import re
+import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -53,6 +54,46 @@ crypto: WeComCrypto | None = None
 rindex: RagIndex | None = None
 weekly_scheduler_task: asyncio.Task | None = None
 WECOM_REPLY_MAX_CHARS = 1800
+
+# 企业微信被动回复超时后会用相同 MsgId 重试回调，导致 #s / 周报发送 等副作用执行多次。
+_wecom_side_effect_lock = asyncio.Lock()
+_wecom_side_effect_msg_ids: dict[str, float] = {}
+WECOM_SIDE_EFFECT_DEDUP_TTL_SEC = 600
+
+
+def _wecom_text_has_side_effects(txt: str) -> bool:
+    """会改状态或对外群发的文本，需要去重。"""
+    t = (txt or "").strip()
+    if _looks_like_operator_command(t):
+        return True
+    if not t.startswith("周报"):
+        return False
+    if t in ("周报", "周报 帮助", "周报 help") or t.startswith("周报 状态"):
+        return False
+    return True
+
+
+async def _wecom_try_begin_side_effect(msg_id: str) -> bool:
+    """
+    同一 MsgId 在 TTL 内只允许执行一次副作用。
+    返回 True 表示本次应执行；False 表示重复回调应跳过。
+    """
+    mid = (msg_id or "").strip()
+    if not mid:
+        return True
+    async with _wecom_side_effect_lock:
+        now = time.time()
+        expired = [k for k, exp in _wecom_side_effect_msg_ids.items() if exp < now]
+        for k in expired:
+            del _wecom_side_effect_msg_ids[k]
+        if mid in _wecom_side_effect_msg_ids:
+            logger.info("wecom side-effect duplicate callback skipped msg_id=%s", mid)
+            return False
+        _wecom_side_effect_msg_ids[mid] = now + WECOM_SIDE_EFFECT_DEDUP_TTL_SEC
+        if len(_wecom_side_effect_msg_ids) > 8000:
+            for k in list(_wecom_side_effect_msg_ids.keys())[:2000]:
+                _wecom_side_effect_msg_ids.pop(k, None)
+        return True
 
 
 def _rebuild_index(db: Session) -> None:
@@ -413,22 +454,64 @@ async def _send_custom_message_to_scope(
 
 async def _parse_operator_intent(text: str) -> dict[str, object]:
     raw = (text or "").strip()
-    quick = re.match(r"^发送今天做了多少道题给学生ID\s*([A-Za-z0-9_-]+)$", raw)
-    if quick:
+    # Rule-first parsing for high-frequency command patterns.
+    # 1) send weekly to one student
+    m = re.search(r"(发送|推送).*(周报|五维).*(学生\s*ID|ID)\s*[:：]?\s*([A-Za-z0-9_-]+)", raw, flags=re.IGNORECASE)
+    if m:
         return {
-            "action": "send_today_student",
+            "action": "send_weekly",
             "scope": "student",
-            "student_uid": quick.group(1),
+            "student_uid": m.group(4),
             "group": "",
             "message": "",
         }
+    # 2) stats today for one student (to operator)
+    m = re.search(
+        r"(统计|查看|查询|看下).*(今天|今日).*(学生\s*ID|ID)\s*[:：]?\s*([A-Za-z0-9_-]+).*?(做题|题目|提交|AC)?",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return {
+            "action": "stats_today_student",
+            "scope": "student",
+            "student_uid": m.group(4),
+            "group": "",
+            "message": "",
+        }
+    # 3) send today's done count to one student's parent
+    m = re.search(r"(发送|推送).*(今天|今日).*(学生\s*ID|ID)\s*[:：]?\s*([A-Za-z0-9_-]+).*(做题|题目|提交|AC)", raw, flags=re.IGNORECASE)
+    if m:
+        return {
+            "action": "send_today_student",
+            "scope": "student",
+            "student_uid": m.group(4),
+            "group": "",
+            "message": "",
+        }
+    # 4) class stats today/weekly
+    m = re.search(r"(统计|查看|查询).*(今天|今日|本周).*(.+?班).*(做题|题目|提交|AC)", raw, flags=re.IGNORECASE)
+    if m:
+        return {
+            "action": "stats_today" if m.group(2) in ("今天", "今日") else "stats_weekly",
+            "scope": "group",
+            "student_uid": "",
+            "group": m.group(3).strip(),
+            "message": "",
+        }
+    # 5) full stats today/weekly
+    if re.search(r"(统计|查看|查询).*(今天|今日).*(做题|题目|提交|AC)", raw, flags=re.IGNORECASE):
+        return {"action": "stats_today", "scope": "all", "student_uid": "", "group": "", "message": ""}
+    if re.search(r"(统计|查看|查询).*(本周).*(做题|题目|提交|AC)", raw, flags=re.IGNORECASE):
+        return {"action": "stats_weekly", "scope": "all", "student_uid": "", "group": "", "message": ""}
+
     messages = [
         {
             "role": "system",
             "content": (
                 "你是企业微信运营指令解析器。请把用户命令解析成 JSON，不要输出其它文字。\n"
                 "字段：action, scope, student_uid, group, message。\n"
-                "action 只允许：send_weekly, send_custom, send_today_student, stats_weekly, stats_today。\n"
+                "action 只允许：send_weekly, send_custom, send_today_student, stats_weekly, stats_today, stats_today_student。\n"
                 "scope 只允许：all, group, student, me。\n"
                 "无法确定时：action=unknown，scope=all。"
             ),
@@ -774,6 +857,16 @@ async def _handle_operator_ai_command(db: Session, operator_id: str, text: str) 
         today = get_today_students_stats()
         return _summarize_today_stats(today, group=gp if scope == "group" else "")
 
+    if action == "stats_today_student" and su:
+        today = get_today_students_stats()
+        row = next((r for r in today if str(r.get("uid") or "").strip() == su), None)
+        if not row:
+            return f"未找到 student_uid={su} 今日数据。"
+        return (
+            f"学生今日做题数据：{row.get('name','')}（{su}）\n"
+            f"提交：{int(row.get('today_submits') or 0)}，AC：{int(row.get('today_ac') or 0)}"
+        )
+
     return (
         "未识别该运维指令。示例：\n"
         "1) Hi bot 发送五维数据周报给每个学生\n"
@@ -926,19 +1019,22 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
         reply_text = "目前只支持文本咨询。请发送文字问题。"
     else:
         txt = msg.content.strip()
-        logger.info("wecom text received: from=%s content=%s", msg.from_user_name, txt[:200])
-        cmd_reply = await _handle_weekly_command(db, msg.from_user_name, txt)
-        if cmd_reply is not None:
-            reply_text = cmd_reply
+        logger.info("wecom text received: from=%s msg_id=%s content=%s", msg.from_user_name, msg.msg_id, txt[:200])
+        if _wecom_text_has_side_effects(txt) and not await _wecom_try_begin_side_effect(msg.msg_id):
+            reply_text = "本指令已在首次回调中执行；企业微信重复回调已忽略，避免重复发送。"
         else:
-            ai_cmd_reply = await _handle_operator_ai_command(db, msg.from_user_name, txt)
-            if ai_cmd_reply is not None:
-                reply_text = ai_cmd_reply
+            cmd_reply = await _handle_weekly_command(db, msg.from_user_name, txt)
+            if cmd_reply is not None:
+                reply_text = cmd_reply
             else:
-                # Always acknowledge immediately, then send full AI answer asynchronously.
-                asyncio.create_task(_send_deferred_wecom_reply(msg.from_user_name, txt))
-                reply_text = "已收到，正在整理详细回复，将稍后推送给你。"
-                logger.info("wecom immediate ack + deferred reply: from=%s", msg.from_user_name)
+                ai_cmd_reply = await _handle_operator_ai_command(db, msg.from_user_name, txt)
+                if ai_cmd_reply is not None:
+                    reply_text = ai_cmd_reply
+                else:
+                    # Always acknowledge immediately, then send full AI answer asynchronously.
+                    asyncio.create_task(_send_deferred_wecom_reply(msg.from_user_name, txt))
+                    reply_text = "已收到，正在整理详细回复，将稍后推送给你。"
+                    logger.info("wecom immediate ack + deferred reply: from=%s", msg.from_user_name)
 
     # WeCom callback text payload has practical size limits; overlong replies may be dropped and retried.
     if len(reply_text) > WECOM_REPLY_MAX_CHARS:
