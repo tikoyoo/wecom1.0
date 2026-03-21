@@ -256,3 +256,41 @@ def get_weekly_students(db: Session, force_refresh: bool = False) -> list[dict]:
 def get_today_students_stats() -> list[dict]:
     """Returns today's submits/ac counts from Hydro for all students."""
     return _run_remote_hydro_db(HYDRO_TODAY_JS)
+
+
+def compute_today_stats_by_group(rows: list[dict]) -> list[dict]:
+    """
+    按 Hydro 班级（group）聚合今日数据；班内学生按今日 AC 降序，其次提交次数降序。
+    同一学生属于多个班级时，在每个班级各计一条。
+    """
+    from collections import defaultdict
+
+    by_group: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        for g in r.get("groups") or []:
+            gn = str(g).strip()
+            if not gn:
+                continue
+            by_group[gn].append(
+                {
+                    "uid": r.get("uid"),
+                    "name": r.get("name") or "未知",
+                    "today_ac": int(r.get("today_ac") or 0),
+                    "today_submits": int(r.get("today_submits") or 0),
+                }
+            )
+    out: list[dict] = []
+    for gn in sorted(by_group.keys()):
+        students = by_group[gn]
+        students.sort(key=lambda x: (-x["today_ac"], -x["today_submits"]))
+        out.append(
+            {
+                "group": gn,
+                "total_ac": sum(s["today_ac"] for s in students),
+                "total_submits": sum(s["today_submits"] for s in students),
+                "student_count": len(students),
+                "students": students,
+            }
+        )
+    out.sort(key=lambda x: (-x["total_ac"], x["group"]))
+    return out

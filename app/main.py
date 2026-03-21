@@ -32,7 +32,7 @@ from .db import (
     get_db,
     init_db,
 )
-from .hydro_service import get_today_students_stats, get_weekly_students
+from .hydro_service import compute_today_stats_by_group, get_today_students_stats, get_weekly_students
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
 from .reports_service import render_weekly_report, send_weekly_reports
@@ -1253,9 +1253,108 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/weekly-files">每周学生更新数据文件</a></div>
       <div><a href="/admin/binding-requests">待审核绑定</a></div>
       <div><a href="/admin/push">主动推送</a></div>
+      <div><a href="/admin/today-class-stats">今日各班级做题统计（Hydro）</a></div>
     </div>
     """
     return html_page("Admin", body)
+
+
+def _today_class_stats_cache_path() -> Path:
+    return Path(settings.data_dir) / "today_class_stats_cache.json"
+
+
+@app.get("/admin/today-class-stats", response_class=HTMLResponse)
+async def admin_today_class_stats(_user: str = Depends(require_admin)):
+    cache_path = _today_class_stats_cache_path()
+    updated_at = ""
+    err_msg = ""
+    groups: list = []
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            updated_at = str(data.get("updated_at") or "")
+            groups = data.get("groups") or []
+            err_msg = str(data.get("error") or "")
+        except Exception as e:
+            err_msg = f"缓存读取失败: {e}"
+
+    parts: list[str] = []
+    parts.append("<h2>今日各班级做题统计</h2>")
+    parts.append(
+        '<div class="card" style="margin-bottom:14px">'
+        '<form action="/admin/today-class-stats/refresh" method="post" style="display:inline">'
+        '<button type="submit">一键更新（从 Hydro 拉取）</button>'
+        "</form>"
+        '<span style="margin-left:12px;color:#666">数据来自 Hydro 远程查询，可能需数十秒。</span>'
+        "</div>"
+    )
+    if updated_at:
+        parts.append(f'<p style="color:#666">上次更新时间：<code>{html.escape(updated_at)}</code></p>')
+    else:
+        parts.append('<p style="color:#666">尚未拉取过数据，请点击「一键更新」。</p>')
+
+    if err_msg:
+        parts.append(
+            '<div class="card" style="border-color:#fecaca;background:#fff1f2">'
+            f"<strong>错误</strong><pre style='white-space:pre-wrap'>{html.escape(err_msg)}</pre></div>"
+        )
+
+    if not groups and not err_msg:
+        parts.append("<p>暂无班级数据。</p>")
+    elif groups:
+        for g in groups:
+            gname = html.escape(str(g.get("group") or ""))
+            tac = g.get("total_ac")
+            tsub = g.get("total_submits")
+            cnt = g.get("student_count")
+            parts.append(
+                f'<div class="card" style="margin-bottom:16px">'
+                f"<h3>{gname}</h3>"
+                f"<p>班级合计：AC <strong>{tac}</strong>　提交 <strong>{tsub}</strong>　学生数 {cnt}</p>"
+                "<table><thead><tr><th>姓名</th><th>今日 AC</th><th>今日提交</th><th>uid</th></tr></thead><tbody>"
+            )
+            for s in g.get("students") or []:
+                nm = html.escape(str(s.get("name") or ""))
+                uid = html.escape(str(s.get("uid") or ""))
+                parts.append(
+                    f"<tr><td>{nm}</td><td>{s.get('today_ac')}</td><td>{s.get('today_submits')}</td>"
+                    f"<td><code>{uid}</code></td></tr>"
+                )
+            parts.append("</tbody></table></div>")
+
+    body = "\n".join(parts)
+    body += '<div style="margin-top:16px"><a href="/admin/">返回</a></div>'
+    return html_page("今日班级统计", body)
+
+
+@app.post("/admin/today-class-stats/refresh")
+async def admin_today_class_stats_refresh(_user: str = Depends(require_admin)):
+    cache_path = _today_class_stats_cache_path()
+    old_groups: list = []
+    if cache_path.exists():
+        try:
+            old = json.loads(cache_path.read_text(encoding="utf-8"))
+            old_groups = old.get("groups") or []
+        except Exception:
+            pass
+    try:
+        rows = get_today_students_stats()
+        groups = compute_today_stats_by_group(rows)
+        payload = {
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "groups": groups,
+            "error": None,
+        }
+        cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.exception("today-class-stats refresh failed")
+        payload = {
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "groups": old_groups,
+            "error": str(e)[:4000],
+        }
+        cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return Response(status_code=303, headers={"Location": "/admin/today-class-stats"})
 
 
 @app.get("/admin/docs", response_class=HTMLResponse)
