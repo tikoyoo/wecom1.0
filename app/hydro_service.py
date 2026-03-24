@@ -261,20 +261,24 @@ def get_today_students_stats() -> list[dict]:
 STUDENT_HYDRO_STATS_JS = r"""
 try {
  const domain = 'system';
- const uid = __UID__;
+ const uidRaw = __UID__;
+ /** 名录里常为字符串 "29"，Hydro 库里 uid 可能为数字 29，需同时匹配 */
+ const uidQ = (typeof uidRaw === "string" && /^\d+$/.test(uidRaw))
+   ? { $in: [uidRaw, parseInt(uidRaw, 10)] }
+   : uidRaw;
  const now = new Date();
  const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
  const weekObjId = ObjectId(Math.floor(weekAgo/1000).toString(16) + "0000000000000000");
  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
  const dayObjId = ObjectId(Math.floor(dayStart/1000).toString(16) + "0000000000000000");
 
- const u = db['domain.user'].findOne({ domainId: domain, uid: uid });
+ const u = db['domain.user'].findOne({ domainId: domain, uid: uidQ });
  if (!u) {
    print("---JSON_START---");
-   print(JSON.stringify({ error: "user_not_found", uid: uid }));
+   print(JSON.stringify({ error: "user_not_found", uid: uidRaw }));
    print("---JSON_END---");
  } else {
-   const userGroups = db['user.group'].find({ domainId: domain, uids: uid }).toArray().map(g => g.name);
+   const userGroups = db['user.group'].find({ domainId: domain, uids: uidQ }).toArray().map(g => g.name);
    const activeHwDocs = db.document.find({
      domainId: domain,
      docType: 30,
@@ -293,14 +297,14 @@ try {
    allHwPids.sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
 
    const acPidsEver = db.record.distinct("pid", {
-     uid: uid, domainId: domain, status: 1
+     uid: uidQ, domainId: domain, status: 1
    }).map(p => p.toString());
 
    const acSet = new Set(acPidsEver);
    const hwTasks = allHwPids.map(pid => ({ pid: pid, ac: acSet.has(pid) }));
 
    const weekAcPids = db.record.distinct("pid", {
-     uid: uid,
+     uid: uidQ,
      domainId: domain,
      status: 1,
      _id: { $gt: weekObjId }
@@ -308,12 +312,12 @@ try {
    weekAcPids.sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
 
    const todayRecords = db.record.find({
-     uid: uid,
+     uid: uidQ,
      domainId: domain,
      _id: { $gt: dayObjId }
    }).toArray();
    const todayAcPids = db.record.distinct("pid", {
-     uid: uid,
+     uid: uidQ,
      domainId: domain,
      status: 1,
      _id: { $gt: dayObjId }
@@ -323,7 +327,7 @@ try {
    const hwTitle = userHwDocs.length > 0 ? userHwDocs.map(hw => hw.title).join('、') : '无作业';
 
    const result = {
-     uid: uid,
+     uid: String(u.uid != null ? u.uid : uidRaw),
      name: u.displayName || "未知",
      hw_title: hwTitle,
      hw_tasks: hwTasks,
