@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from urllib.parse import quote
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -32,7 +33,12 @@ from .db import (
     get_db,
     init_db,
 )
-from .hydro_service import compute_today_stats_by_group, get_today_students_stats, get_weekly_students
+from .hydro_service import (
+    compute_today_stats_by_group,
+    get_student_hydro_stats,
+    get_today_students_stats,
+    get_weekly_students,
+)
 from .llm import deepseek_chat
 from .rag import RagIndex, add_document_with_chunks
 from .reports_service import render_weekly_report, send_weekly_reports
@@ -864,6 +870,69 @@ class ChatIn(BaseModel):
     message: str = Field(min_length=1)
 
 
+def _student_records_by_name(db: Session, name: str) -> list[StudentRecord]:
+    key = _norm_student_name(name)
+    if not key:
+        return []
+    return (
+        db.query(StudentRecord)
+        .filter(StudentRecord.name_key == key)
+        .order_by(StudentRecord.student_uid.asc())
+        .all()
+    )
+
+
+def _format_h5_student_stats_html(stats: dict, student_uid: str) -> str:
+    """作业题 / 本周 / 今日 展示块（依赖 get_student_hydro_stats 返回结构）。"""
+    name = html.escape(str(stats.get("name") or ""))
+    uid_disp = html.escape(str(stats.get("uid") or student_uid))
+    hw_title = html.escape(str(stats.get("hw_title") or ""))
+    tasks = stats.get("hw_tasks") or []
+    pills: list[str] = []
+    for t in tasks:
+        pid = html.escape(str(t.get("pid") or ""))
+        cls = "task-ac" if t.get("ac") else "task-no"
+        pills.append(f'<span class="{cls}">{pid}</span>')
+    pills_html = " ".join(pills) if pills else "<span style='color:#6b7280'>当前无进行中作业或未分配到班级作业。</span>"
+
+    week_pids = stats.get("week_ac_pids") or []
+    week_txt = "、".join(html.escape(str(x)) for x in week_pids) if week_pids else "（无）"
+    today_pids = stats.get("today_ac_pids") or []
+    today_txt = "、".join(html.escape(str(x)) for x in today_pids) if today_pids else "（无）"
+
+    extra_css = """
+    <style>
+    .task-ac { display:inline-block; margin:4px 6px 4px 0; padding:6px 10px; border-radius:8px;
+      background:#ecfdf3; color:#166534; border:1px solid #bbf7d0; font-weight:600; }
+    .task-no { display:inline-block; margin:4px 6px 4px 0; padding:6px 10px; border-radius:8px;
+      background:#f3f4f6; color:#6b7280; border:1px solid #e5e7eb; }
+    </style>
+    """
+    return f"""
+    {extra_css}
+    <h2>学生做题统计</h2>
+    <p style="color:#374151">{name}　<code>{uid_disp}</code></p>
+    <div class="card">
+      <h3 style="margin-top:0">当前作业题</h3>
+      <p style="color:#6b7280;font-size:14px">作业：{hw_title}</p>
+      <p style="color:#6b7280;font-size:13px">绿色=已在 OJ 上 AC 该题；灰色=尚未 AC。</p>
+      <div style="line-height:1.8">{pills_html}</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">本周 AC</h3>
+      <p>题数：<strong>{int(stats.get("week_ac_count") or 0)}</strong></p>
+      <p style="word-break:break-all">题号：{week_txt}</p>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">今日</h3>
+      <p>AC 题数：<strong>{int(stats.get("today_ac") or 0)}</strong>　提交次数：<strong>{int(stats.get("today_submits") or 0)}</strong></p>
+      <p style="word-break:break-all">今日 AC 题号：{today_txt}</p>
+    </div>
+    <p style="color:#9ca3af;font-size:13px">数据来自 Hydro；今日/本周以 OJ 服务器本地日历为准。</p>
+    <p><a href="/h5/student-stats">再查一名学生</a></p>
+    """
+
+
 async def _handle_weekly_command(db: Session, operator_id: str, text: str) -> str | None:
     ops = _parse_op_ids()
     op = (operator_id or "").strip().lower()
@@ -1171,6 +1240,115 @@ async def api_chat(body: ChatIn, db: Session = Depends(get_db)):
     return {"reply": reply}
 
 
+@app.get("/api/h5/student-stats-data")
+async def api_h5_student_stats_data(
+    name: str = "",
+    student_uid: str = "",
+    db: Session = Depends(get_db),
+):
+    """JSON：按姓名（名录唯一匹配）或 student_uid 查询。"""
+    name = (name or "").strip()
+    student_uid = (student_uid or "").strip()
+    if not student_uid and name:
+        rows = _student_records_by_name(db, name)
+        if len(rows) == 1:
+            student_uid = rows[0].student_uid
+        elif len(rows) == 0:
+            raise HTTPException(status_code=404, detail="未找到该姓名，请核对或与名录同步一致")
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="存在重名，请在网页上点击具体 student_uid 或使用参数 student_uid",
+            )
+    if not student_uid:
+        raise HTTPException(status_code=400, detail="请提供 name 或 student_uid")
+    try:
+        return get_student_hydro_stats(student_uid)
+    except Exception as e:
+        logger.exception("h5 student stats")
+        raise HTTPException(status_code=502, detail=str(e)[:800]) from e
+
+
+@app.get("/h5/student-stats", response_class=HTMLResponse)
+async def h5_student_stats(
+    name: str = "",
+    student_uid: str = "",
+    db: Session = Depends(get_db),
+):
+    """输入姓名查询（名录匹配）；重名时点击链接带上 student_uid。"""
+    name = (name or "").strip()
+    student_uid = (student_uid or "").strip()
+
+    form_html = f"""
+    <h2>学生做题统计</h2>
+    <div class="card">
+      <form method="get" action="/h5/student-stats">
+        <label>学生姓名</label>
+        <input name="name" value="{html.escape(name)}" placeholder="与后台学生名录一致" style="max-width:280px" />
+        <button type="submit" style="margin-left:8px">查询</button>
+      </form>
+      <p style="color:#6b7280;font-size:13px;margin-top:12px">姓名来自系统学生名录（<a href="/admin/students">管理</a>）。多人同名时请点选下方链接。</p>
+    </div>
+    """
+
+    resolved_uid = ""
+    if not student_uid and name:
+        rows = _student_records_by_name(db, name)
+        if len(rows) == 0:
+            body = (
+                form_html
+                + '<div class="card" style="border-color:#fecaca;background:#fff1f2">未找到该姓名。请确认名录已同步，或尝试与班主任登记的写法完全一致。</div>'
+            )
+            return HTMLResponse(html_page("学生统计", body))
+        if len(rows) > 1:
+            lines = []
+            for r in rows:
+                q = quote(str(r.student_uid), safe="")
+                lines.append(
+                    f'<li><a href="/h5/student-stats?student_uid={q}">{html.escape(r.display_name)} '
+                    f'<code>{html.escape(r.student_uid)}</code></a></li>'
+                )
+            body = (
+                form_html
+                + '<div class="card"><p><strong>同名学生</strong>，请选择：</p><ul>'
+                + "\n".join(lines)
+                + "</ul></div>"
+            )
+            return HTMLResponse(html_page("学生统计", body))
+        resolved_uid = rows[0].student_uid
+    elif student_uid:
+        resolved_uid = student_uid
+
+    if not resolved_uid:
+        return HTMLResponse(html_page("学生统计", form_html))
+
+    try:
+        stats = get_student_hydro_stats(resolved_uid)
+    except Exception as e:
+        logger.exception("h5 get_student_hydro_stats")
+        body = (
+            form_html
+            + "<h2>拉取 Hydro 数据失败</h2>"
+            + '<div class="card"><pre style="white-space:pre-wrap">'
+            + html.escape(str(e)[:2000])
+            + "</pre></div>"
+        )
+        return HTMLResponse(html_page("学生统计", body))
+
+    if stats.get("error"):
+        body = (
+            form_html
+            + "<h2>数据异常</h2>"
+            + '<div class="card"><pre style="white-space:pre-wrap">'
+            + html.escape(json.dumps(stats, ensure_ascii=False, indent=2))
+            + "</pre></div>"
+        )
+        return HTMLResponse(html_page("学生统计", body))
+
+    body = form_html + _format_h5_student_stats_html(stats, resolved_uid)
+    return HTMLResponse(html_page("学生统计", body))
+
+
 @app.get("/wecom/callback")
 async def wecom_verify(msg_signature: str, timestamp: str, nonce: str, echostr: str):
     if crypto is None:
@@ -1254,6 +1432,7 @@ async def admin_home(_user: str = Depends(require_admin)):
       <div><a href="/admin/binding-requests">待审核绑定</a></div>
       <div><a href="/admin/push">主动推送</a></div>
       <div><a href="/admin/today-class-stats">今日各班级做题统计（Hydro）</a></div>
+      <div>学生做题统计（输入姓名）：<code>/h5/student-stats</code></div>
     </div>
     """
     return html_page("Admin", body)
@@ -1844,14 +2023,16 @@ async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(req
         (
             f"<tr><td>{b.id}</td>"
             f"<td><code>{html.escape(b.openid)}</code></td>"
+            f"<td><code>{html.escape(b.oa_openid or '')}</code></td>"
             f"<td><code>{html.escape(b.student_uid)}</code></td>"
             f"<td><code>{html.escape(b.external_userid or '')}</code></td>"
             f"<td>{html.escape(stu_map.get(b.student_uid, ''))}</td>"
             f"<td>{b.created_at}</td>"
             f"<td>"
-            f"<form action='/admin/bindings/update' method='post' style='display:flex;gap:6px;align-items:center'>"
+            f"<form action='/admin/bindings/update' method='post' style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>"
             f"<input type='hidden' name='binding_id' value='{b.id}' />"
             f"<input name='student_uid' value='{html.escape(b.student_uid, quote=True)}' style='width:120px' />"
+            f"<input name='oa_openid' value='{html.escape((b.oa_openid or ''), quote=True)}' style='width:180px' placeholder='服务号oa_openid' />"
             f"<input name='external_userid' value='{html.escape((b.external_userid or ''), quote=True)}' style='width:150px' placeholder='外部联系人ID' />"
             f"<button type='submit'>保存</button>"
             f"</form>"
@@ -1865,10 +2046,10 @@ async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(req
     )
     body = f"""
     <h2>已匹配成功（家长绑定）</h2>
-    <p>显示最近 500 条 openid 与 student_uid 的绑定结果。</p>
+    <p>显示最近 500 条绑定：小程序 openid、服务号 oa_openid 与 student_uid。</p>
     <div class="card">
       <table>
-        <thead><tr><th>ID</th><th>openid</th><th>student_uid</th><th>external_userid</th><th>学生姓名</th><th>绑定时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>ID</th><th>openid(小程序)</th><th>oa_openid(服务号)</th><th>student_uid</th><th>external_userid</th><th>学生姓名</th><th>绑定时间</th><th>操作</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
@@ -1881,6 +2062,7 @@ async def admin_bindings(db: Session = Depends(get_db), _user: str = Depends(req
 async def admin_bindings_update(
     binding_id: int = Form(...),
     student_uid: str = Form(...),
+    oa_openid: str = Form(""),
     external_userid: str = Form(""),
     db: Session = Depends(get_db),
     _user: str = Depends(require_admin),
@@ -1892,6 +2074,7 @@ async def admin_bindings_update(
     if not su:
         return Response(status_code=303, headers={"Location": "/admin/bindings"})
     b.student_uid = su
+    b.oa_openid = (oa_openid or "").strip()
     b.external_userid = external_userid.strip()
     db.commit()
     return Response(status_code=303, headers={"Location": "/admin/bindings"})
@@ -2069,13 +2252,24 @@ async def admin_binding_requests_resolve(
         return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
     br.status = "approved"
     br.resolved_student_uid = su
-    exb = (
-        db.query(ParentStudentBinding)
-        .filter(ParentStudentBinding.openid == br.openid, ParentStudentBinding.student_uid == su)
-        .one_or_none()
-    )
-    if not exb:
-        db.add(ParentStudentBinding(openid=br.openid, student_uid=su))
+    oid = (br.openid or "").strip()
+    if oid.startswith("oa:"):
+        oa = oid[3:]
+        exb = (
+            db.query(ParentStudentBinding)
+            .filter(ParentStudentBinding.oa_openid == oa, ParentStudentBinding.student_uid == su)
+            .one_or_none()
+        )
+        if not exb:
+            db.add(ParentStudentBinding(openid="", oa_openid=oa, student_uid=su))
+    else:
+        exb = (
+            db.query(ParentStudentBinding)
+            .filter(ParentStudentBinding.openid == br.openid, ParentStudentBinding.student_uid == su)
+            .one_or_none()
+        )
+        if not exb:
+            db.add(ParentStudentBinding(openid=br.openid, student_uid=su))
     db.commit()
     return Response(status_code=303, headers={"Location": "/admin/binding-requests"})
 

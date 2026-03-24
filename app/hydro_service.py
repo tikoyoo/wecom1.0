@@ -258,6 +258,107 @@ def get_today_students_stats() -> list[dict]:
     return _run_remote_hydro_db(HYDRO_TODAY_JS)
 
 
+STUDENT_HYDRO_STATS_JS = r"""
+try {
+ const domain = 'system';
+ const uid = __UID__;
+ const now = new Date();
+ const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+ const weekObjId = ObjectId(Math.floor(weekAgo/1000).toString(16) + "0000000000000000");
+ const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+ const dayObjId = ObjectId(Math.floor(dayStart/1000).toString(16) + "0000000000000000");
+
+ const u = db['domain.user'].findOne({ domainId: domain, uid: uid });
+ if (!u) {
+   print("---JSON_START---");
+   print(JSON.stringify({ error: "user_not_found", uid: uid }));
+   print("---JSON_END---");
+ } else {
+   const userGroups = db['user.group'].find({ domainId: domain, uids: uid }).toArray().map(g => g.name);
+   const activeHwDocs = db.document.find({
+     domainId: domain,
+     docType: 30,
+     rule: 'homework',
+     endAt: { $gte: now }
+   }).toArray();
+   const userHwDocs = activeHwDocs.filter(hw => hw.assign && hw.assign.some(groupName => userGroups.includes(groupName)));
+
+   let allHwPids = [];
+   userHwDocs.forEach(hw => {
+     hw.pids.forEach(pid => {
+       const pidStr = pid.toString();
+       if (!allHwPids.includes(pidStr)) allHwPids.push(pidStr);
+     });
+   });
+   allHwPids.sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+
+   const acPidsEver = db.record.distinct("pid", {
+     uid: uid, domainId: domain, status: 1
+   }).map(p => p.toString());
+
+   const acSet = new Set(acPidsEver);
+   const hwTasks = allHwPids.map(pid => ({ pid: pid, ac: acSet.has(pid) }));
+
+   const weekAcPids = db.record.distinct("pid", {
+     uid: uid,
+     domainId: domain,
+     status: 1,
+     _id: { $gt: weekObjId }
+   }).map(p => p.toString());
+   weekAcPids.sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+
+   const todayRecords = db.record.find({
+     uid: uid,
+     domainId: domain,
+     _id: { $gt: dayObjId }
+   }).toArray();
+   const todayAcPids = db.record.distinct("pid", {
+     uid: uid,
+     domainId: domain,
+     status: 1,
+     _id: { $gt: dayObjId }
+   }).map(p => p.toString());
+   todayAcPids.sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+
+   const hwTitle = userHwDocs.length > 0 ? userHwDocs.map(hw => hw.title).join('、') : '无作业';
+
+   const result = {
+     uid: uid,
+     name: u.displayName || "未知",
+     hw_title: hwTitle,
+     hw_tasks: hwTasks,
+     week_ac_pids: weekAcPids,
+     week_ac_count: weekAcPids.length,
+     today_submits: todayRecords.length,
+     today_ac: todayAcPids.length,
+     today_ac_pids: todayAcPids
+   };
+   print("---JSON_START---");
+   print(JSON.stringify(result));
+   print("---JSON_END---");
+ }
+} catch(e) {
+ print("---JSON_START---");
+ print(JSON.stringify({ error: "script_error", message: String(e.message || e) }));
+ print("---JSON_END---");
+}
+"""
+
+
+def build_student_hydro_stats_js(uid: str) -> str:
+    """单用户 Hydro 查询：当前作业题单、本周 AC 题号、今日提交与 AC。"""
+    uid_lit = json.dumps((uid or "").strip())
+    return STUDENT_HYDRO_STATS_JS.replace("__UID__", uid_lit)
+
+
+def get_student_hydro_stats(uid: str) -> dict:
+    """从 Hydro 拉取单个 student_uid 的作业题与统计；依赖 HYDRO_SSH_* 配置。"""
+    u = (uid or "").strip()
+    if not u:
+        return {"error": "empty_uid"}
+    return _run_remote_hydro_db(build_student_hydro_stats_js(u))
+
+
 def compute_today_stats_by_group(rows: list[dict]) -> list[dict]:
     """
     按 Hydro 班级（group）聚合今日数据；班内学生按今日 AC 降序，其次提交次数降序。

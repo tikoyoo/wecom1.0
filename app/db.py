@@ -83,6 +83,8 @@ class ParentStudentBinding(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     openid: Mapped[str] = mapped_column(String(128), index=True)
+    # 微信服务号网页授权得到的 openid，与小程序 openid 不同，需单独绑定或后台填写
+    oa_openid: Mapped[str] = mapped_column(String(128), default="", index=True)
     student_uid: Mapped[str] = mapped_column(String(128), index=True)
     external_userid: Mapped[str] = mapped_column(String(128), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -184,6 +186,8 @@ def _sqlite_migrate_compat() -> None:
             conn.execute(text("ALTER TABLE parent_student_bindings ADD COLUMN student_uid VARCHAR(128)"))
         if "external_userid" not in cols:
             conn.execute(text("ALTER TABLE parent_student_bindings ADD COLUMN external_userid VARCHAR(128) DEFAULT ''"))
+        if "oa_openid" not in cols:
+            conn.execute(text("ALTER TABLE parent_student_bindings ADD COLUMN oa_openid VARCHAR(128) DEFAULT ''"))
         if "created_at" not in cols:
             conn.execute(text("ALTER TABLE parent_student_bindings ADD COLUMN created_at DATETIME"))
 
