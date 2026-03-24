@@ -67,6 +67,11 @@ _wecom_side_effect_lock = asyncio.Lock()
 _wecom_side_effect_msg_ids: dict[str, float] = {}
 WECOM_SIDE_EFFECT_DEDUP_TTL_SEC = 600
 
+# H5 学生统计查询频控：同一来源每小时最多查询 1 次。
+H5_STUDENT_QUERY_LIMIT_SEC = 3600
+_h5_student_query_lock = asyncio.Lock()
+_h5_student_query_last_ts: dict[str, float] = {}
+
 
 def _wecom_text_has_side_effects(txt: str) -> bool:
     """会改状态或对外群发的文本，需要去重。"""
@@ -101,6 +106,33 @@ async def _wecom_try_begin_side_effect(msg_id: str) -> bool:
             for k in list(_wecom_side_effect_msg_ids.keys())[:2000]:
                 _wecom_side_effect_msg_ids.pop(k, None)
         return True
+
+
+def _h5_student_query_source_key(request: Request) -> str:
+    # 优先取反向代理透传 IP；否则回退到直连客户端地址。
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        return xff.split(",")[0].strip() or "unknown"
+    client = request.client.host if request.client else ""
+    return (client or "unknown").strip()
+
+
+async def _h5_try_consume_query_quota(request: Request) -> tuple[bool, int]:
+    src = _h5_student_query_source_key(request)
+    now = time.time()
+    async with _h5_student_query_lock:
+        prev = _h5_student_query_last_ts.get(src)
+        if prev is not None:
+            remain = H5_STUDENT_QUERY_LIMIT_SEC - (now - prev)
+            if remain > 0:
+                return False, int(remain + 0.999)
+        _h5_student_query_last_ts[src] = now
+        if len(_h5_student_query_last_ts) > 20000:
+            cutoff = now - H5_STUDENT_QUERY_LIMIT_SEC
+            stale = [k for k, t in _h5_student_query_last_ts.items() if t < cutoff]
+            for k in stale[:5000]:
+                _h5_student_query_last_ts.pop(k, None)
+        return True, 0
 
 
 def _rebuild_index(db: Session) -> None:
@@ -929,7 +961,6 @@ def _format_h5_student_stats_html(stats: dict, student_uid: str) -> str:
       <p style="word-break:break-all">今日 AC 题号：{today_txt}</p>
     </div>
     <p style="color:#9ca3af;font-size:13px">数据来自 Hydro；今日/本周以 OJ 服务器本地日历为准。</p>
-    <p><a href="/h5/student-stats">再查一名学生</a></p>
     """
 
 
@@ -1271,6 +1302,7 @@ async def api_h5_student_stats_data(
 
 @app.get("/h5/student-stats", response_class=HTMLResponse)
 async def h5_student_stats(
+    request: Request,
     name: str = "",
     student_uid: str = "",
     db: Session = Depends(get_db),
@@ -1321,6 +1353,18 @@ async def h5_student_stats(
 
     if not resolved_uid:
         return HTMLResponse(html_page("学生统计", form_html))
+
+    ok, remain_sec = await _h5_try_consume_query_quota(request)
+    if not ok:
+        mm = remain_sec // 60
+        ss = remain_sec % 60
+        tip = f"查询过于频繁：同一来源每小时仅可查询 1 次，请在 {mm} 分 {ss} 秒后重试。"
+        body = form_html + (
+            '<div class="card" style="border-color:#fecaca;background:#fff1f2">'
+            + html.escape(tip)
+            + "</div>"
+        )
+        return HTMLResponse(html_page("学生统计", body))
 
     try:
         stats = get_student_hydro_stats(resolved_uid)
