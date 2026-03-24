@@ -71,6 +71,7 @@ WECOM_SIDE_EFFECT_DEDUP_TTL_SEC = 600
 H5_STUDENT_QUERY_LIMIT_SEC = 3600
 _h5_student_query_lock = asyncio.Lock()
 _h5_student_query_last_ts: dict[str, float] = {}
+_h5_student_last_name_by_src: dict[str, str] = {}
 
 
 def _wecom_text_has_side_effects(txt: str) -> bool:
@@ -133,6 +134,24 @@ async def _h5_try_consume_query_quota(request: Request) -> tuple[bool, int]:
             for k in stale[:5000]:
                 _h5_student_query_last_ts.pop(k, None)
         return True, 0
+
+
+async def _h5_set_last_name_for_source(request: Request, name: str) -> None:
+    nm = (name or "").strip()
+    if not nm:
+        return
+    src = _h5_student_query_source_key(request)
+    async with _h5_student_query_lock:
+        _h5_student_last_name_by_src[src] = nm
+        if len(_h5_student_last_name_by_src) > 20000:
+            for k in list(_h5_student_last_name_by_src.keys())[:5000]:
+                _h5_student_last_name_by_src.pop(k, None)
+
+
+async def _h5_get_last_name_for_source(request: Request) -> str:
+    src = _h5_student_query_source_key(request)
+    async with _h5_student_query_lock:
+        return (_h5_student_last_name_by_src.get(src) or "").strip()
 
 
 def _rebuild_index(db: Session) -> None:
@@ -1310,6 +1329,9 @@ async def h5_student_stats(
     """输入姓名查询（名录匹配）；重名时点击链接带上 student_uid。"""
     name = (name or "").strip()
     student_uid = (student_uid or "").strip()
+    remembered_name = await _h5_get_last_name_for_source(request)
+    if not name and remembered_name:
+        name = remembered_name
 
     form_html = f"""
     <h2>学生做题统计</h2>
@@ -1348,6 +1370,7 @@ async def h5_student_stats(
             )
             return HTMLResponse(html_page("学生统计", body))
         resolved_uid = rows[0].student_uid
+        await _h5_set_last_name_for_source(request, name)
     elif student_uid:
         resolved_uid = student_uid
 
@@ -1389,6 +1412,8 @@ async def h5_student_stats(
         )
         return HTMLResponse(html_page("学生统计", body))
 
+    if name:
+        await _h5_set_last_name_for_source(request, name)
     body = form_html + _format_h5_student_stats_html(stats, resolved_uid)
     return HTMLResponse(html_page("学生统计", body))
 
