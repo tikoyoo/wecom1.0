@@ -1863,10 +1863,10 @@ async def wecom_verify(msg_signature: str, timestamp: str, nonce: str, echostr: 
         return PlainTextResponse(f"decrypt failed: {e}", status_code=400)
 
 
-async def _send_deferred_external_reply(external_userid: str, text: str, db_factory) -> None:
+async def _send_deferred_external_reply(external_userid: str, text: str) -> None:
     """异步处理外部联系人消息，通过主动推送回复。"""
     try:
-        with next(db_factory()) as db:
+        with next(get_db()) as db:  # type: ignore[arg-type]
             reply = await _handle_external_message(db, external_userid, text)
         if len(reply) > WECOM_REPLY_MAX_CHARS:
             reply = reply[:WECOM_REPLY_MAX_CHARS] + "\n\n（内容较长，已截断）"
@@ -1897,7 +1897,7 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
         if msg.msg_type == "text" and msg.content.strip():
             txt = msg.content.strip()
             logger.info("external msg received: from=%s msg_id=%s content=%s", msg.from_user_name, msg.msg_id, txt[:200])
-            asyncio.create_task(_send_deferred_external_reply(msg.from_user_name, txt, get_db))
+            asyncio.create_task(_send_deferred_external_reply(msg.from_user_name, txt))
         return Response(content=b"", media_type="text/plain")
 
     # 内部员工消息：走原有逻辑
