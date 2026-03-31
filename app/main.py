@@ -1892,6 +1892,9 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
     plain_xml = crypto.decrypt(enc.encrypt)
     msg = parse_plain_xml(plain_xml)
 
+    # 调试日志：记录所有进来的消息，方便排查外部联系人消息格式
+    logger.info("callback msg: from=%s to=%s type=%s msg_id=%s", msg.from_user_name, msg.to_user_name, msg.msg_type, msg.msg_id)
+
     # 外部联系人消息：异步处理后主动推送，直接返回空响应
     if _is_external_userid(msg.from_user_name):
         if msg.msg_type == "text" and msg.content.strip():
