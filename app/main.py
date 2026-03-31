@@ -799,6 +799,184 @@ async def _parse_operator_intent(text: str) -> dict[str, object]:
     }
 
 
+# ── 外部联系人消息处理 ────────────────────────────────────────────────────────
+
+def _is_external_userid(user_id: str) -> bool:
+    """企业微信外部联系人 ID 以 wo 或 wm 开头。"""
+    s = (user_id or "").strip()
+    return s.startswith("wo") or s.startswith("wm")
+
+
+def _get_bound_students(db: Session, external_userid: str) -> list[str]:
+    """返回该外部联系人绑定的所有 student_uid 列表。"""
+    rows = (
+        db.query(ParentStudentBinding)
+        .filter(ParentStudentBinding.external_userid == external_userid)
+        .all()
+    )
+    return [r.student_uid for r in rows if (r.student_uid or "").strip()]
+
+
+_EXTERNAL_QUERY_TODAY_PATTERNS = [
+    r"今[天日]",
+    r"今日",
+    r"查今",
+]
+_EXTERNAL_QUERY_WEEK_PATTERNS = [
+    r"本周",
+    r"这周",
+    r"一周",
+    r"周报",
+    r"查周",
+]
+_EXTERNAL_QUERY_HW_PATTERNS = [
+    r"作业",
+    r"homework",
+    r"hw",
+]
+
+
+def _match_external_intent(text: str) -> str:
+    """识别外部用户查询意图：today / week / hw / unknown。"""
+    t = (text or "").strip()
+    for p in _EXTERNAL_QUERY_TODAY_PATTERNS:
+        if re.search(p, t, re.IGNORECASE):
+            return "today"
+    for p in _EXTERNAL_QUERY_WEEK_PATTERNS:
+        if re.search(p, t, re.IGNORECASE):
+            return "week"
+    for p in _EXTERNAL_QUERY_HW_PATTERNS:
+        if re.search(p, t, re.IGNORECASE):
+            return "hw"
+    return "unknown"
+
+
+def _format_external_today_reply(student_uid: str, db: Session) -> str:
+    """生成单个学生今日做题回复文本。"""
+    try:
+        today_rows = get_today_students_stats()
+    except Exception as e:
+        return f"获取今日数据失败，请稍后再试。（{e}）"
+
+    row = next((r for r in today_rows if str(r.get("uid") or "").strip() == student_uid), None)
+    if not row:
+        return "暂未查到今日数据，可能数据还未同步，请稍后再试。"
+
+    name = str(row.get("name") or "")
+    submits = int(row.get("today_submits") or 0)
+    ac = int(row.get("today_ac") or 0)
+    active_days = int(row.get("active_days") or 0)
+    last_active = str(row.get("last_active_date") or "")
+
+    return (
+        f"📊 {name} 今日做题情况\n\n"
+        f"✅ 今日 AC：{ac} 题\n"
+        f"📝 今日提交：{submits} 次\n"
+        f"🔥 累计活跃天数：{active_days} 天\n"
+        f"📅 最近活跃：{last_active or '暂无记录'}"
+    )
+
+
+def _format_external_week_reply(student_uid: str, db: Session) -> str:
+    """生成单个学生本周做题回复文本。"""
+    wk = _latest_week_key(db)
+    if not wk:
+        return "暂无本周数据，请稍后再试。"
+
+    row = db.query(StudentWeeklyMetric).filter(
+        StudentWeeklyMetric.week_key == wk,
+        StudentWeeklyMetric.student_uid == student_uid,
+    ).one_or_none()
+
+    if not row:
+        return f"暂未查到 {wk} 周数据，可能数据还未同步，请稍后再试。"
+
+    return (
+        f"📊 {row.name} 本周做题情况（{wk}）\n\n"
+        f"📈 当前排名：第 {row.rank} 名\n"
+        f"💡 本周 AC：{row.week_ac} 题\n"
+        f"📝 本周提交：{row.week_submits} 次\n"
+        f"🔥 活跃天数：{row.active_days} 天\n"
+        f"📅 最近活跃：{row.last_active or '暂无记录'}\n\n"
+        f"📚 当前作业：{row.hw_title or '暂无'}\n"
+        f"✅ 完成情况：{row.hw_done}/{row.hw_total}"
+    )
+
+
+def _format_external_hw_reply(student_uid: str, db: Session) -> str:
+    """生成单个学生作业完成情况回复文本。"""
+    wk = _latest_week_key(db)
+    if not wk:
+        return "暂无作业数据，请稍后再试。"
+
+    row = db.query(StudentWeeklyMetric).filter(
+        StudentWeeklyMetric.week_key == wk,
+        StudentWeeklyMetric.student_uid == student_uid,
+    ).one_or_none()
+
+    if not row:
+        return "暂未查到作业数据，可能数据还未同步，请稍后再试。"
+
+    if not row.hw_title:
+        return f"{row.name} 当前暂无进行中的作业。"
+
+    done_emoji = "✅" if row.hw_done >= row.hw_total and row.hw_total > 0 else "⏳"
+    return (
+        f"📚 {row.name} 作业完成情况\n\n"
+        f"作业：{row.hw_title}\n"
+        f"{done_emoji} 完成：{row.hw_done}/{row.hw_total} 题\n"
+        f"（数据周期：{wk}）"
+    )
+
+
+_EXTERNAL_HELP_TEXT = (
+    "您好！我是学习助手，可以帮您查询孩子的学习情况。\n\n"
+    "支持以下查询：\n"
+    "• 发送「今日」或「今天」— 查看今日做题情况\n"
+    "• 发送「本周」或「这周」— 查看本周做题情况\n"
+    "• 发送「作业」— 查看当前作业完成情况\n\n"
+    "其他问题也可以直接发送，我会尽力解答。"
+)
+
+
+async def _handle_external_message(db: Session, external_userid: str, text: str) -> str:
+    """
+    处理外部联系人（家长）发来的消息。
+    返回回复文本，调用方负责通过 add_msg_template_single 发送。
+    """
+    txt = (text or "").strip()
+
+    # 帮助指令
+    if txt in ("帮助", "help", "?", "？", "菜单"):
+        return _EXTERNAL_HELP_TEXT
+
+    # 查找绑定的学生
+    student_uids = _get_bound_students(db, external_userid)
+
+    if not student_uids:
+        # 未绑定：走知识库 AI 回复
+        return await answer_with_rag_and_memory(db, f"ext:{external_userid}", txt)
+
+    intent = _match_external_intent(txt)
+
+    if intent == "unknown":
+        # 非查询指令：走知识库 AI 回复，带学生上下文
+        extra = f"【会话上下文】家长已绑定学生 student_uid={','.join(student_uids)}。"
+        return await answer_with_rag_and_memory(db, f"ext:{external_userid}", txt, extra_system=extra)
+
+    # 有绑定学生时，逐个生成查询结果
+    parts: list[str] = []
+    for uid in student_uids:
+        if intent == "today":
+            parts.append(_format_external_today_reply(uid, db))
+        elif intent == "week":
+            parts.append(_format_external_week_reply(uid, db))
+        elif intent == "hw":
+            parts.append(_format_external_hw_reply(uid, db))
+
+    return "\n\n---\n\n".join(parts) if parts else "暂无数据，请稍后再试。"
+
+
 _MASTER_AT_CMDS = ("@群发", "@查询", "@发送", "@帮助", "@help")
 
 
@@ -1685,6 +1863,23 @@ async def wecom_verify(msg_signature: str, timestamp: str, nonce: str, echostr: 
         return PlainTextResponse(f"decrypt failed: {e}", status_code=400)
 
 
+async def _send_deferred_external_reply(external_userid: str, text: str, db_factory) -> None:
+    """异步处理外部联系人消息，通过主动推送回复。"""
+    try:
+        with next(db_factory()) as db:
+            reply = await _handle_external_message(db, external_userid, text)
+        if len(reply) > WECOM_REPLY_MAX_CHARS:
+            reply = reply[:WECOM_REPLY_MAX_CHARS] + "\n\n（内容较长，已截断）"
+        sender = (settings.wecom_external_sender_id or "").strip()
+        if not sender:
+            logger.warning("external reply skipped: WECOM_EXTERNAL_SENDER_ID not configured")
+            return
+        await add_msg_template_single(external_userid=external_userid, content=reply, sender_userid=sender)
+        logger.info("external reply sent: to=%s len=%s", external_userid, len(reply))
+    except Exception:
+        logger.exception("external reply failed: to=%s", external_userid)
+
+
 @app.post("/wecom/callback")
 async def wecom_callback(request: Request, msg_signature: str, timestamp: str, nonce: str, db: Session = Depends(get_db)):
     if crypto is None:
@@ -1697,6 +1892,15 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
     plain_xml = crypto.decrypt(enc.encrypt)
     msg = parse_plain_xml(plain_xml)
 
+    # 外部联系人消息：异步处理后主动推送，直接返回空响应
+    if _is_external_userid(msg.from_user_name):
+        if msg.msg_type == "text" and msg.content.strip():
+            txt = msg.content.strip()
+            logger.info("external msg received: from=%s msg_id=%s content=%s", msg.from_user_name, msg.msg_id, txt[:200])
+            asyncio.create_task(_send_deferred_external_reply(msg.from_user_name, txt, get_db))
+        return Response(content=b"", media_type="text/plain")
+
+    # 内部员工消息：走原有逻辑
     if msg.msg_type != "text" or not msg.content.strip():
         reply_text = "目前只支持文本咨询。请发送文字问题。"
     else:
@@ -1717,7 +1921,6 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
                     if ai_cmd_reply is not None:
                         reply_text = ai_cmd_reply
                     else:
-                        # Always acknowledge immediately, then send full AI answer asynchronously.
                         asyncio.create_task(_send_deferred_wecom_reply(msg.from_user_name, txt))
                         reply_text = "已收到，正在整理详细回复，将稍后推送给你。"
                         logger.info("wecom immediate ack + deferred reply: from=%s", msg.from_user_name)
