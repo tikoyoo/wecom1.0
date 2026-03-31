@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     rag_top_k: int = 4
     rag_chunk_size: int = 900
     rag_chunk_overlap: int = 120
+    rag_min_score: float = 1.0  # BM25 最低相关性阈值，低于此分数的 chunk 不送入 prompt
 
     # Memory
     memory_max_turns: int = 8

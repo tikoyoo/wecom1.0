@@ -1,7 +1,0 @@
-<view class="page">
-  <view class="card">
-    <text class="title">正在进入聊天…</text>
-    <text class="sub">请稍候</text>
-  </view>
-</view>
-

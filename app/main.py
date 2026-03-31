@@ -78,6 +78,9 @@ def _wecom_text_has_side_effects(txt: str) -> bool:
     """会改状态或对外群发的文本，需要去重。"""
     t = (txt or "").strip()
     if _looks_like_operator_command(t):
+        # @查询 和 @帮助 只读，不需要去重
+        if t.startswith("@查询") or t in ("@帮助", "@help"):
+            return False
         return True
     if not t.startswith("周报"):
         return False
@@ -177,9 +180,28 @@ async def answer_with_rag_and_memory(
     *,
     extra_system: str | None = None,
 ) -> str:
+    # 阶段1：输入清洗
+    question = _clean_query(question)
+    if not question:
+        return "您好，请问有什么可以帮您？"
+
     user = _get_or_create_user(db, wecom_user_id)
 
-    # memory
+    # 阶段2：意图识别 — 闲聊直接回复，不走 RAG
+    if _is_chitchat(question):
+        chitchat_replies = {
+            "谢谢": "不客气，有其他问题随时告诉我！",
+            "感谢": "不客气，有其他问题随时告诉我！",
+            "再见": "再见，有需要随时联系！",
+            "拜拜": "拜拜，有需要随时联系！",
+            "bye": "Bye！有需要随时联系！",
+        }
+        for kw, reply in chitchat_replies.items():
+            if kw in question.lower():
+                return reply
+        return "您好！请问有什么可以帮您？"
+
+    # memory：取最近 N 轮历史
     turns = (
         db.query(ChatMessage)
         .filter(ChatMessage.user_id == user.id)
@@ -189,35 +211,58 @@ async def answer_with_rag_and_memory(
     )
     turns = list(reversed(turns))
 
-    # rag
-    hits = (rindex.search(question, settings.rag_top_k) if rindex else [])
+    # 阶段3：知识检索（带相关性阈值）
+    hits = (rindex.search(question, settings.rag_top_k, min_score=settings.rag_min_score) if rindex else [])
     logger.info(
         "rag search: user=%s q=%s hits=%s",
         wecom_user_id,
-        (question or "")[:120],
+        question[:120],
         len(hits),
     )
-    ctx_lines = []
-    for i, (_chunk_id, text, _score) in enumerate(hits, start=1):
-        ctx_lines.append(f"[{i}] {text.strip()}")
-    ctx = "\n\n".join(ctx_lines)
 
+    # 阶段4：AI 生成（严格 grounding prompt）
     system = (
-        "你是企业客服与咨询助手。优先根据【知识库】回答；如果知识库没有相关信息，明确说明并给出可执行的建议。"
-        "回答要简洁、中文、结构清晰。若引用知识库，请在句末用 [1]/[2] 标注来源编号。"
+        "你是编程教育机构的客服助手。\n"
+        "【规则】\n"
+        "1. 只能根据下方【知识库】内容回答，不得编造或推测知识库以外的信息。\n"
+        "2. 如果知识库中没有相关内容，必须回复：'抱歉，我暂时没有这方面的信息，建议您直接联系老师确认。'\n"
+        "3. 回答简洁、中文、结构清晰，不超过300字。\n"
+        "4. 引用知识库内容时在句末标注 [来源N]。\n"
+        "5. 不要重复用户的问题，直接给出答案。"
     )
     if extra_system:
         system = f"{system}\n\n{extra_system}"
-    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
-    if ctx:
-        messages.append({"role": "system", "content": f"【知识库】\n{ctx}"})
 
-    # If KB hits exist, avoid old memory overriding retrieval-grounded answers.
-    # This keeps WeCom and mini-program answers more consistent for same question.
+    # 无 KB 命中时的处理
     if not hits:
-        for t in turns:
-            if t.role in ("user", "assistant"):
-                messages.append({"role": t.role, "content": t.content})
+        # 有历史上下文时走多轮对话（追问场景），无历史时直接兜底
+        if not turns:
+            reply = "抱歉，我暂时没有这方面的信息，建议您直接联系老师确认。"
+            db.add(ChatMessage(user_id=user.id, role="user", content=question))
+            db.add(ChatMessage(user_id=user.id, role="assistant", content=reply))
+            db.commit()
+            return reply
+        # 有上下文时加约束后走 LLM
+        system += "\n\n注意：当前知识库无相关内容，请基于对话上下文回答，如无法确定请如实说明，不要编造。"
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+
+    if hits:
+        ctx_lines = []
+        for i, (_chunk_id, text, score) in enumerate(hits, start=1):
+            ctx_lines.append(f"[来源{i}] {text.strip()}")
+        ctx = "\n\n".join(ctx_lines)
+        messages.append({"role": "system", "content": f"【知识库】\n{ctx}"})
+        # 有 KB hits 时保留最近 2 轮历史作为上下文锚点（修复追问断裂问题）
+        recent_turns = turns[-4:]
+    else:
+        # 无 KB hits 时保留全部历史记忆
+        recent_turns = turns
+
+    for t in recent_turns:
+        if t.role in ("user", "assistant"):
+            messages.append({"role": t.role, "content": t.content})
+
     messages.append({"role": "user", "content": question})
 
     reply = await deepseek_chat(messages)
@@ -263,7 +308,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="WeCom KB Bot", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="WeCom KB Bot", version="0.2.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -282,6 +327,34 @@ async def api_mini_status():
         "secret_configured": has_secret,
         "hint": "小程序工具里的 AppID 须与此处一致；改 .env 后必须重启后端进程。",
     }
+
+
+# ── 阶段1：输入清洗 ──────────────────────────────────────────────────────────
+
+def _clean_query(text: str) -> str:
+    """去除控制字符，截断超长输入。"""
+    t = (text or "").strip()
+    t = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", t)
+    return t[:500]
+
+
+# ── 阶段2：意图识别 ──────────────────────────────────────────────────────────
+
+_CHITCHAT_PATTERNS = [
+    r"^(你好|hi|hello|在吗|在不|哈喽|嗨|hey)[\s？?！!。~～]*$",
+    r"^(谢谢|感谢|好的|收到|明白|了解|ok|okay|好)[\s！!。~～]*$",
+    r"^(再见|拜拜|bye|goodbye|晚安|88)[\s！!。~～]*$",
+    r"^(哈哈|哈哈哈|嗯嗯|嗯|哦|哦哦|噢|好的好的)[\s！!。~～]*$",
+]
+
+
+def _is_chitchat(text: str) -> bool:
+    """判断是否为闲聊/问候，闲聊不走 RAG 检索。"""
+    s = (text or "").strip()
+    for p in _CHITCHAT_PATTERNS:
+        if re.match(p, s, re.IGNORECASE):
+            return True
+    return False
 
 
 def _norm_student_name(name: str) -> str:
@@ -726,12 +799,18 @@ async def _parse_operator_intent(text: str) -> dict[str, object]:
     }
 
 
+_MASTER_AT_CMDS = ("@群发", "@查询", "@发送", "@帮助", "@help")
+
+
 def _looks_like_operator_command(cmd: str) -> bool:
     s = (cmd or "").strip()
     if not s:
         return False
-    # 强约束：仅 #s 开头视为运维指令（支持 "#s统计..." 和 "#s 统计..."）
-    return bool(re.match(r"^\s*[#＃]s", s, flags=re.IGNORECASE))
+    # #s 开头视为运维指令
+    if re.match(r"^\s*[#＃]s", s, flags=re.IGNORECASE):
+        return True
+    # @ 精确命令
+    return any(s.startswith(c) for c in _MASTER_AT_CMDS)
 
 
 async def _weekly_scheduler_loop() -> None:
@@ -981,6 +1060,180 @@ def _format_h5_student_stats_html(stats: dict, student_uid: str) -> str:
     </div>
     <p style="color:#9ca3af;font-size:13px">数据来自 Hydro；今日/本周以 OJ 服务器本地日历为准。</p>
     """
+
+
+def _list_groups(db: Session) -> str:
+    wk = _latest_week_key(db)
+    if not wk:
+        return "暂无周数据，请先同步 Hydro 周数据。"
+    rows = db.query(StudentWeeklyMetric).filter(StudentWeeklyMetric.week_key == wk).all()
+    class_count: dict[str, int] = {}
+    for r in rows:
+        try:
+            gs = json.loads(r.groups_json or "[]")
+        except Exception:
+            gs = []
+        for g in gs:
+            gn = str(g).strip()
+            if gn:
+                class_count[gn] = class_count.get(gn, 0) + 1
+    if not class_count:
+        return f"周 {wk} 暂无班级数据。"
+    lines = [f"班级列表（{wk}，共 {len(class_count)} 个）："]
+    for gn, cnt in sorted(class_count.items(), key=lambda x: (-x[1], x[0])):
+        lines.append(f"  {gn}：{cnt} 人")
+    return "\n".join(lines)
+
+
+_MASTER_HELP_TEXT = (
+    "主账号指令（精确命令）：\n"
+    "\n"
+    "【查询】\n"
+    "@查询 今日              — 今日全量统计\n"
+    "@查询 今日 班级=xxx     — 今日某班级统计\n"
+    "@查询 今日 学生=uid     — 今日某学生数据\n"
+    "@查询 本周              — 本周全量统计\n"
+    "@查询 本周 班级=xxx     — 本周某班级统计\n"
+    "@查询 班级列表          — 列出所有班级\n"
+    "\n"
+    "【群发】\n"
+    "@群发 消息内容          — 全量群发给所有家长\n"
+    "@群发 班级=xxx 消息内容 — 按班级群发\n"
+    "\n"
+    "【发送周报】\n"
+    "@发送 周报              — 全量发送周报\n"
+    "@发送 周报 班级=xxx     — 按班级发送周报\n"
+    "@发送 周报 学生=uid     — 发送单个学生周报\n"
+    "\n"
+    "【其他】\n"
+    "周报 帮助               — 周报定时指令\n"
+    "#s 自然语言指令         — AI 解析运维指令（兜底）"
+)
+
+
+async def _handle_master_command(db: Session, operator_id: str, text: str) -> str | None:
+    """处理主账号 @ 精确命令，优先级高于 AI 解析。"""
+    ops = _parse_op_ids()
+    op = (operator_id or "").strip().lower()
+    if not ops or op not in ops:
+        return None
+
+    cmd = (text or "").strip()
+    if not cmd:
+        return None
+
+    # 仅处理 @ 开头的精确命令
+    if not any(cmd.startswith(c) for c in _MASTER_AT_CMDS):
+        return None
+
+    sender_userid = (settings.wecom_external_sender_id or "").strip() or operator_id
+
+    # @帮助
+    if cmd in ("@帮助", "@help"):
+        return _MASTER_HELP_TEXT
+
+    # @群发
+    if cmd.startswith("@群发"):
+        body = cmd[3:].strip()
+        group = ""
+        # 支持 班级=xxx 或 班级 xxx（空格）
+        m = re.match(r"班级\s*[=＝]\s*([^\s]+)\s*([\s\S]*)", body)
+        if not m:
+            m = re.match(r"班级\s+([^\s]+)\s+([\s\S]+)", body)
+        if m:
+            group = m.group(1).strip()
+            body = m.group(2).strip()
+        if not body:
+            return "格式：@群发 [班级=xxx] 消息内容\n示例：@群发 班级=CSP-J4 明天上课时间调整为下午3点"
+        ok, fail, skip = await _send_custom_message_to_scope(
+            db,
+            sender_userid=sender_userid,
+            message=body,
+            scope="group" if group else "all",
+            group=group,
+        )
+        scope_desc = f"班级={group}" if group else "全量"
+        return f"群发完成（{scope_desc}）：成功 {ok}，失败 {fail}，跳过 {skip}"
+
+    # @查询
+    if cmd.startswith("@查询"):
+        body = cmd[3:].strip()
+        if not body:
+            return "格式：@查询 今日/本周/班级列表 [班级=xxx] [学生=uid]"
+
+        if body in ("班级列表", "班级"):
+            return _list_groups(db)
+
+        is_today = bool(re.match(r"今[天日]", body))
+        is_week = "本周" in body
+
+        gm = re.search(r"班级\s*[=＝]\s*([^\s]+)", body)
+        sm = re.search(r"学生\s*[=＝]\s*([A-Za-z0-9_-]+)", body)
+        group = gm.group(1).strip() if gm else ""
+        student_uid = sm.group(1).strip() if sm else ""
+
+        if is_today:
+            today = get_today_students_stats()
+            if student_uid:
+                row = next((r for r in today if str(r.get("uid") or "").strip() == student_uid), None)
+                if not row:
+                    return f"未找到 student_uid={student_uid} 今日数据。"
+                return (
+                    f"学生今日数据：{row.get('name', '')}（{student_uid}）\n"
+                    f"提交：{int(row.get('today_submits') or 0)}，AC：{int(row.get('today_ac') or 0)}"
+                )
+            return _summarize_today_stats(today, group=group)
+
+        if is_week:
+            return _summarize_weekly_group_stats(db, group=group)
+
+        return "格式：@查询 今日/本周 [班级=xxx] [学生=uid]\n或：@查询 班级列表"
+
+    # @发送
+    if cmd.startswith("@发送"):
+        body = cmd[3:].strip()
+        if not body:
+            return "格式：@发送 周报 [班级=xxx] [学生=uid]"
+
+        if body.startswith("周报"):
+            gm = re.search(r"班级\s*[=＝]\s*([^\s]+)", body)
+            sm = re.search(r"学生\s*[=＝]\s*([A-Za-z0-9_-]+)", body)
+            group = gm.group(1).strip() if gm else ""
+            student_uid = sm.group(1).strip() if sm else ""
+
+            if student_uid:
+                week_raw = get_weekly_students(db, force_refresh=True)
+                target_raw = next((r for r in week_raw if str(r.get("uid") or "").strip() == student_uid), None)
+                if not target_raw:
+                    return f"未找到 student_uid={student_uid} 的周数据。"
+                targets = db.query(ParentStudentBinding).filter(ParentStudentBinding.student_uid == student_uid).all()
+                ok = 0
+                fail = 0
+                for b in targets:
+                    ext = (b.external_userid or "").strip()
+                    if not ext:
+                        continue
+                    try:
+                        content = render_weekly_report(target_raw, template_text=_load_weekly_template())
+                        await add_msg_template_single(external_userid=ext, content=content, sender_userid=sender_userid)
+                        ok += 1
+                    except Exception:
+                        fail += 1
+                return f"已发送学生周报：student_uid={student_uid}，成功 {ok}，失败 {fail}"
+
+            res = await send_weekly_reports(
+                db,
+                sender=sender_userid,
+                group=group,
+                force_refresh=True,
+                template_text=_load_weekly_template(),
+            )
+            scope_desc = f"班级={res.group}" if res.group else "全量"
+            return f"周报发送完成（{scope_desc}）：week={res.week_key} 成功 {res.ok}，失败 {res.fail}，跳过 {res.skip}"
+
+        return "格式：@发送 周报 [班级=xxx] [学生=uid]"
+
+    return None
 
 
 async def _handle_weekly_command(db: Session, operator_id: str, text: str) -> str | None:
@@ -1456,14 +1709,18 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
             if cmd_reply is not None:
                 reply_text = cmd_reply
             else:
-                ai_cmd_reply = await _handle_operator_ai_command(db, msg.from_user_name, txt)
-                if ai_cmd_reply is not None:
-                    reply_text = ai_cmd_reply
+                master_reply = await _handle_master_command(db, msg.from_user_name, txt)
+                if master_reply is not None:
+                    reply_text = master_reply
                 else:
-                    # Always acknowledge immediately, then send full AI answer asynchronously.
-                    asyncio.create_task(_send_deferred_wecom_reply(msg.from_user_name, txt))
-                    reply_text = "已收到，正在整理详细回复，将稍后推送给你。"
-                    logger.info("wecom immediate ack + deferred reply: from=%s", msg.from_user_name)
+                    ai_cmd_reply = await _handle_operator_ai_command(db, msg.from_user_name, txt)
+                    if ai_cmd_reply is not None:
+                        reply_text = ai_cmd_reply
+                    else:
+                        # Always acknowledge immediately, then send full AI answer asynchronously.
+                        asyncio.create_task(_send_deferred_wecom_reply(msg.from_user_name, txt))
+                        reply_text = "已收到，正在整理详细回复，将稍后推送给你。"
+                        logger.info("wecom immediate ack + deferred reply: from=%s", msg.from_user_name)
 
     # WeCom callback text payload has practical size limits; overlong replies may be dropped and retried.
     if len(reply_text) > WECOM_REPLY_MAX_CHARS:
