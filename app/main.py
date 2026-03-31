@@ -1885,11 +1885,19 @@ async def wecom_callback(request: Request, msg_signature: str, timestamp: str, n
     if crypto is None:
         return PlainTextResponse("wecom not configured", status_code=500)
     body = await request.body()
+    logger.info("callback raw: len=%s body_prefix=%s", len(body), body[:300])
     enc = parse_encrypted_xml(body)
     if not crypto.verify_signature(msg_signature, timestamp, nonce, enc.encrypt):
+        logger.warning("callback signature verify failed")
         return PlainTextResponse("invalid signature", status_code=403)
 
-    plain_xml = crypto.decrypt(enc.encrypt)
+    try:
+        plain_xml = crypto.decrypt(enc.encrypt)
+    except Exception as e:
+        logger.exception("callback decrypt failed: %s", e)
+        return PlainTextResponse("decrypt failed", status_code=400)
+
+    logger.info("callback decrypted xml: %s", plain_xml[:500] if isinstance(plain_xml, (str, bytes)) else str(plain_xml)[:500])
     msg = parse_plain_xml(plain_xml)
 
     # 调试日志：记录所有进来的消息，方便排查外部联系人消息格式
