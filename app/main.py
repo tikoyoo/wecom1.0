@@ -1721,7 +1721,78 @@ async def api_chat(body: ChatIn, db: Session = Depends(get_db)):
     return {"reply": reply}
 
 
-@app.get("/api/h5/student-stats-data")
+class WxBotChatIn(BaseModel):
+    sender: str = Field(min_length=1)  # 微信昵称/备注名
+    message: str = Field(min_length=1)
+    student_uid: str = ""  # 可选，指定学生；为空时按 sender 查绑定
+
+
+@app.post("/api/wx-bot/chat")
+async def api_wx_bot_chat(body: WxBotChatIn, db: Session = Depends(get_db)):
+    """
+    wxAuto 本地脚本调用的 API。
+    接收 sender（微信昵称）+ message，走意图识别 + 数据查询 / 知识库 AI。
+    """
+    sender = body.sender.strip()
+    msg = body.message.strip()
+    student_uid = (body.student_uid or "").strip()
+
+    # 闲聊直接回复
+    if _is_chitchat(msg):
+        chitchat_map = {
+            "谢谢": "不客气，有其他问题随时告诉我！",
+            "感谢": "不客气，有其他问题随时告诉我！",
+            "再见": "再见，有需要随时联系！",
+            "拜拜": "拜拜，有需要随时联系！",
+        }
+        for kw, reply in chitchat_map.items():
+            if kw in msg:
+                return {"reply": reply}
+        return {"reply": "您好！请问有什么可以帮您？"}
+
+    # 帮助
+    if msg in ("帮助", "help", "?", "？", "菜单"):
+        return {"reply": _EXTERNAL_HELP_TEXT}
+
+    # 如果没有指定 student_uid，尝试通过 sender 名称查找绑定
+    # 先查 ExternalContact 的 remark/name 匹配 sender
+    bound_uids: list[str] = []
+    if student_uid:
+        bound_uids = [student_uid]
+    else:
+        # 方式1：通过 ExternalContact 的 name/remark 匹配
+        contacts = db.query(ExternalContact).filter(
+            (ExternalContact.name == sender) | (ExternalContact.remark.contains(sender))
+        ).all()
+        for c in contacts:
+            if c.student_uid_hint:
+                bound_uids.append(c.student_uid_hint)
+        # 方式2：通过 StudentRecord 的 display_name 匹配（sender 可能是学生姓名）
+        if not bound_uids:
+            students = _student_records_by_name(db, sender)
+            bound_uids = [s.student_uid for s in students]
+
+    # 意图识别
+    intent = _match_external_intent(msg)
+
+    if intent != "unknown" and bound_uids:
+        parts: list[str] = []
+        for uid in bound_uids:
+            if intent == "today":
+                parts.append(_format_external_today_reply(uid, db))
+            elif intent == "week":
+                parts.append(_format_external_week_reply(uid, db))
+            elif intent == "hw":
+                parts.append(_format_external_hw_reply(uid, db))
+        reply = "\n\n---\n\n".join(parts) if parts else "暂无数据，请稍后再试。"
+        return {"reply": reply}
+
+    # 其他问题走知识库 AI
+    extra = ""
+    if bound_uids:
+        extra = f"【会话上下文】当前绑定学生 student_uid={','.join(bound_uids)}。"
+    reply = await answer_with_rag_and_memory(db, f"wx:{sender}", msg, extra_system=extra or None)
+    return {"reply": reply}
 async def api_h5_student_stats_data(
     name: str = "",
     student_uid: str = "",

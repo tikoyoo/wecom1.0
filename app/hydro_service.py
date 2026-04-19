@@ -28,6 +28,10 @@ class HydroStudentWeekly:
 HYDRO_WEEKLY_JS = r"""
 try {
  const domain = 'system';
+ /** Hydro: IDE/样例测试(pretest) 与 generate 任务的 record.contest 为固定占位 ObjectId，不计入提交统计 */
+ const RECORD_PRETEST = ObjectId("000000000000000000000000");
+ const RECORD_GENERATE = ObjectId("000000000000000000000001");
+ const notPretestOrGenerate = { contest: { $nin: [RECORD_PRETEST, RECORD_GENERATE] } };
  const now = new Date();
  const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
  const weekObjId = ObjectId(Math.floor(weekAgo/1000).toString(16) + "0000000000000000");
@@ -62,13 +66,15 @@ try {
  uid: uid,
  domainId: domain,
  status: 1,
- _id: { $gt: weekObjId }
+ _id: { $gt: weekObjId },
+ ...notPretestOrGenerate
  }).map(p => p.toString());
 
  const weekRecords = db.record.find({
  uid: uid,
  domainId: domain,
- _id: { $gt: weekObjId }
+ _id: { $gt: weekObjId },
+ ...notPretestOrGenerate
  }).sort({ _id: -1 }).toArray();
 
  const hwDone = allHwPids.filter(pid => weekAcPids.includes(pid)).length;
@@ -101,6 +107,9 @@ try {
 HYDRO_TODAY_JS = r"""
 try {
  const domain = 'system';
+ const RECORD_PRETEST = ObjectId("000000000000000000000000");
+ const RECORD_GENERATE = ObjectId("000000000000000000000001");
+ const notPretestOrGenerate = { contest: { $nin: [RECORD_PRETEST, RECORD_GENERATE] } };
  const now = new Date();
   const y = now.getFullYear();
   const m = now.getMonth() + 1;
@@ -117,13 +126,15 @@ try {
    const records = db.record.find({
      uid: uid,
      domainId: domain,
-     _id: { $gt: dayObjId }
+     _id: { $gt: dayObjId },
+     ...notPretestOrGenerate
    }).toArray();
    const acPids = db.record.distinct("pid", {
      uid: uid,
      domainId: domain,
      status: 1,
-     _id: { $gt: dayObjId }
+     _id: { $gt: dayObjId },
+     ...notPretestOrGenerate
    });
     const todaySubmits = records.length;
     const todayAc = acPids.length;
@@ -261,6 +272,9 @@ def get_today_students_stats() -> list[dict]:
 STUDENT_HYDRO_STATS_JS = r"""
 try {
  const domain = 'system';
+ const RECORD_PRETEST = ObjectId("000000000000000000000000");
+ const RECORD_GENERATE = ObjectId("000000000000000000000001");
+ const notPretestOrGenerate = { contest: { $nin: [RECORD_PRETEST, RECORD_GENERATE] } };
  const uidRaw = __UID__;
  /** 名录里常为字符串 "29"，Hydro 库里 uid 可能为数字 29，需同时匹配 */
  const uidQ = (typeof uidRaw === "string" && /^\d+$/.test(uidRaw))
@@ -307,20 +321,23 @@ try {
      uid: uidQ,
      domainId: domain,
      status: 1,
-     _id: { $gt: weekObjId }
+     _id: { $gt: weekObjId },
+     ...notPretestOrGenerate
    }).map(p => p.toString());
    weekAcPids.sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
 
    const todayRecords = db.record.find({
      uid: uidQ,
      domainId: domain,
-     _id: { $gt: dayObjId }
+     _id: { $gt: dayObjId },
+     ...notPretestOrGenerate
    }).toArray();
    const todayAcPids = db.record.distinct("pid", {
      uid: uidQ,
      domainId: domain,
      status: 1,
-     _id: { $gt: dayObjId }
+     _id: { $gt: dayObjId },
+     ...notPretestOrGenerate
    }).map(p => p.toString());
    todayAcPids.sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
 
