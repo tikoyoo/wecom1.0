@@ -1,0 +1,423 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>CIE 机器人三级理论模拟测试 - 第一套</title>
+    <style>
+        body { font-family: "Microsoft YaHei", sans-serif; background-color: #f4f7f6; color: #333; line-height: 1.6; padding: 20px; max-width: 900px; margin: auto; }
+        h1 { text-align: center; color: #2c3e50; }
+        .info { background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .question { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .q-title { font-weight: bold; margin-bottom: 10px; color: #2980b9; }
+        .options label { display: block; padding: 8px; margin: 5px 0; border: 1px solid #eee; border-radius: 4px; cursor: pointer; transition: 0.3s; }
+        .options label:hover { background-color: #eef7ff; }
+        .options input { margin-right: 10px; }
+        .explanation { display: none; margin-top: 15px; padding: 10px; background: #e8f4fd; border-left: 5px solid #3498db; font-size: 0.9em; }
+        .correct-ans { color: #27ae60; font-weight: bold; }
+        #submit-btn { display: block; width: 200px; height: 50px; margin: 30px auto; background: #3498db; color: #fff; border: none; border-radius: 25px; font-size: 1.1em; cursor: pointer; }
+        #submit-btn:hover { background: #2980b9; }
+        #result-box { display: none; background: #fff; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px; border: 2px solid #3498db; }
+        .score { font-size: 2em; color: #e74c3c; font-weight: bold; }
+        .status-correct { background-color: #d4edda !important; }
+        .status-wrong { background-color: #f8d7da !important; }
+    </style>
+</head>
+<body>
+
+    <h1>CIE 机器人三级理论模拟测试（第一套）</h1>
+    <div class="info">
+        <p><strong>题数：</strong>30题 | <strong>总分：</strong>100分 | <strong>考察范围：</strong>Arduino基础、电路基础、Mixly编程</p>
+    </div>
+
+    <form id="quizForm">
+        <!-- 题目开始 -->
+        <div class="question" id="q1">
+            <p class="q-title">1. Arduino UNO/Nano主控板的MCU工作主频通常是多少？</p>
+            <div class="options">
+                <label><input type="radio" name="q1" value="A"> A. 2MHz</label>
+                <label><input type="radio" name="q1" value="B"> B. 8MHz</label>
+                <label><input type="radio" name="q1" value="C" data-cor="true"> C. 16MHz</label>
+                <label><input type="radio" name="q1" value="D"> D. 32MHz</label>
+            </div>
+            <div class="explanation">解析：根据资料，Arduino UNO/Nano主控板的工作主频通常是16MHz。</div>
+        </div>
+
+        <div class="question" id="q2">
+            <p class="q-title">2. 关于欧姆定律，下列公式表示正确的是？</p>
+            <div class="options">
+                <label><input type="radio" name="q2" value="A"> A. U = I / R</label>
+                <label><input type="radio" name="q2" value="B" data-cor="true"> B. I = U / R</label>
+                <label><input type="radio" name="q2" value="C"> C. R = I / U</label>
+                <label><input type="radio" name="q2" value="D"> D. I = U * R</label>
+            </div>
+            <div class="explanation">解析：欧姆定律的标准公式为 I=U/R（电流等于电压除以电阻）。</div>
+        </div>
+
+        <div class="question" id="q3">
+            <p class="q-title">3. 下列电子元器件中，属于“执行器”的是？</p>
+            <div class="options">
+                <label><input type="radio" name="q3" value="A"> A. 超声波传感器</label>
+                <label><input type="radio" name="q3" value="B"> B. 电位器</label>
+                <label><input type="radio" name="q3" value="C" data-cor="true"> C. 舵机</label>
+                <label><input type="radio" name="q3" value="D"> D. 遥控器</label>
+            </div>
+            <div class="explanation">解析：舵机是典型的执行器，用于控制动作。</div>
+        </div>
+
+        <div class="question" id="q4">
+            <p class="q-title">4. 在电路中，用于表示电阻单位的符号是？</p>
+            <div class="options">
+                <label><input type="radio" name="q4" value="A"> A. A</label>
+                <label><input type="radio" name="q4" value="B"> B. V</label>
+                <label><input type="radio" name="q4" value="C" data-cor="true"> C. Ω</label>
+                <label><input type="radio" name="q4" value="D"> D. U</label>
+            </div>
+            <div class="explanation">解析：电阻的单位是欧姆，符号为 Ω。</div>
+        </div>
+
+        <div class="question" id="q5">
+            <p class="q-title">5. 正常情况下，人体安全电压不超过多少伏特？</p>
+            <div class="options">
+                <label><input type="radio" name="q5" value="A"> A. 5V</label>
+                <label><input type="radio" name="q5" value="B"> B. 12V</label>
+                <label><input type="radio" name="q5" value="C" data-cor="true"> C. 36V</label>
+                <label><input type="radio" name="q5" value="D"> D. 220V</label>
+            </div>
+            <div class="explanation">解析：资料显示正常情况下，超过36V的电压会对人体造成伤害。</div>
+        </div>
+
+        <div class="question" id="q6">
+            <p class="q-title">6. Arduino UNO主控板的Flash存储空间大小通常是？</p>
+            <div class="options">
+                <label><input type="radio" name="q6" value="A"> A. 32MB</label>
+                <label><input type="radio" name="q6" value="B" data-cor="true"> B. 32KB</label>
+                <label><input type="radio" name="q6" value="C"> C. 2KB</label>
+                <label><input type="radio" name="q6" value="D"> D. 1MB</label>
+            </div>
+            <div class="explanation">解析：Arduino UNO主控板的Flash空间大小通常为32KB。</div>
+        </div>
+
+        <div class="question" id="q7">
+            <p class="q-title">7. 在流程图中，表示“判断”结构的符号是？</p>
+            <div class="options">
+                <label><input type="radio" name="q7" value="A"> A. 矩形</label>
+                <label><input type="radio" name="q7" value="B"> B. 平行四边形</label>
+                <label><input type="radio" name="q7" value="C" data-cor="true"> C. 菱形</label>
+                <label><input type="radio" name="q7" value="D"> D. 圆角矩形</label>
+            </div>
+            <div class="explanation">解析：菱形代表判断，矩形代表处理，平行四边形代表输入/输出，圆角矩形代表开始/结束。</div>
+        </div>
+
+        <div class="question" id="q8">
+            <p class="q-title">8. 光敏电阻的阻值随光照强度的增强而如何变化？</p>
+            <div class="options">
+                <label><input type="radio" name="q8" value="A"> A. 增大</label>
+                <label><input type="radio" name="q8" value="B" data-cor="true"> B. 减小</label>
+                <label><input type="radio" name="q8" value="C"> C. 不变</label>
+                <label><input type="radio" name="q8" value="D"> D. 消失</label>
+            </div>
+            <div class="explanation">解析：光敏电阻的特性是：光照越强，阻值越小。</div>
+        </div>
+
+        <div class="question" id="q9">
+            <p class="q-title">9. 下列引脚中，具有模拟输出（PWM）功能的是？</p>
+            <div class="options">
+                <label><input type="radio" name="q9" value="A"> A. 2号引脚</label>
+                <label><input type="radio" name="q9" value="B" data-cor="true"> B. 3号引脚</label>
+                <label><input type="radio" name="q9" value="C"> C. 4号引脚</label>
+                <label><input type="radio" name="q9" value="D"> D. 7号引脚</label>
+            </div>
+            <div class="explanation">解析：Arduino UNO支持模拟输出的引脚通常带有“~”符号，包括3, 5, 6, 9, 10, 11。</div>
+        </div>
+
+        <div class="question" id="q10">
+            <p class="q-title">10. 在Mixly程序中，保存逻辑表达式（如1 > 0）返回值的变量类型应为？</p>
+            <div class="options">
+                <label><input type="radio" name="q10" value="A"> A. 整数型</label>
+                <label><input type="radio" name="q10" value="B"> B. 字符型</label>
+                <label><input type="radio" name="q10" value="C" data-cor="true"> C. 布尔型</label>
+                <label><input type="radio" name="q10" value="D"> D. 浮点型</label>
+            </div>
+            <div class="explanation">解析：逻辑表达式的结果为真（true）或假（false），属于布尔型。</div>
+        </div>
+
+        <!-- 此处为节省篇幅展示前10题，JavaScript会处理30题。为了演示，我将补足后续20题题目内容 -->
+        <!-- 题目 11 - 30 -->
+        <div class="question" id="q11">
+            <p class="q-title">11. 关于并联电路，下列说法错误的是？</p>
+            <div class="options">
+                <label><input type="radio" name="q11" value="A"> A. 各支路电压相等</label>
+                <label><input type="radio" name="q11" value="B"> B. 干路电流等于各支路电流之和</label>
+                <label><input type="radio" name="q11" value="C" data-cor="true"> C. 一处支路断开，整个电路便断路</label>
+                <label><input type="radio" name="q11" value="D"> D. 总电阻小于任一支路电阻</label>
+            </div>
+            <div class="explanation">解析：并联电路中，某一支路断开不影响其他支路，只有串联电路一处断开才会全路不通。</div>
+        </div>
+
+        <div class="question" id="q12">
+            <p class="q-title">12. 超声波传感器HC-SR04中，用于接收回响信号的引脚是？</p>
+            <div class="options">
+                <label><input type="radio" name="q12" value="A"> A. Trig</label>
+                <label><input type="radio" name="q12" value="B" data-cor="true"> B. Echo</label>
+                <label><input type="radio" name="q12" value="C"> C. VCC</label>
+                <label><input type="radio" name="q12" value="D"> D. GND</label>
+            </div>
+            <div class="explanation">解析：Trig引脚负责发送触发信号，Echo引脚负责接收反射回来的信号。</div>
+        </div>
+
+        <div class="question" id="q13">
+            <p class="q-title">13. Arduino UNO控制板的标准工作电压是多少？</p>
+            <div class="options">
+                <label><input type="radio" name="q13" value="A"> A. 3.3V</label>
+                <label><input type="radio" name="q13" value="B" data-cor="true"> B. 5V</label>
+                <label><input type="radio" name="q13" value="C"> C. 12V</label>
+                <label><input type="radio" name="q13" value="D"> D. 220V</label>
+            </div>
+            <div class="explanation">解析：Arduino UNO的主控芯片及引脚逻辑电压标准为5V。</div>
+        </div>
+
+        <div class="question" id="q14">
+            <p class="q-title">14. 映射模块：将变量i从映射到，当i为1023时，返回值为？</p>
+            <div class="options">
+                <label><input type="radio" name="q14" value="A" data-cor="true"> A. 0</label>
+                <label><input type="radio" name="q14" value="B"> B. 1023</label>
+                <label><input type="radio" name="q14" value="C"> C. 255</label>
+                <label><input type="radio" name="q14" value="D"> D. 512</label>
+            </div>
+            <div class="explanation">解析：映射是线性对应的。原范围1023对应新范围的终点0。</div>
+        </div>
+
+        <div class="question" id="q15">
+            <p class="q-title">15. 程序模块 `item = 非 item`，若item初始为“真”，运行后结果为？</p>
+            <div class="options">
+                <label><input type="radio" name="q15" value="A"> A. 真</label>
+                <label><input type="radio" name="q15" value="B" data-cor="true"> B. 假</label>
+                <label><input type="radio" name="q15" value="C"> C. 1</label>
+                <label><input type="radio" name="q15" value="D"> D. 不确定</label>
+            </div>
+            <div class="explanation">解析：“非”运算即逻辑取反。真的取反结果为假。</div>
+        </div>
+
+        <div class="question" id="q16">
+            <p class="q-title">16. 在电路图中，标识符“GND”代表？</p>
+            <div class="options">
+                <label><input type="radio" name="q16" value="A"> A. 电源正极</label>
+                <label><input type="radio" name="q16" value="B" data-cor="true"> B. 电源地（负极）</label>
+                <label><input type="radio" name="q16" value="C"> C. 信号引脚</label>
+                <label><input type="radio" name="q16" value="D"> D. 空脚</label>
+            </div>
+            <div class="explanation">解析：GND是Ground的缩写，代表电路的地线或电源负极。</div>
+        </div>
+
+        <div class="question" id="q17">
+            <p class="q-title">17. 关于发光二极管（LED），下列说法正确的是？</p>
+            <div class="options">
+                <label><input type="radio" name="q17" value="A"> A. 没有正负极之分</label>
+                <label><input type="radio" name="q17" value="B"> B. 可以双向导通电流</label>
+                <label><input type="radio" name="q17" value="C" data-cor="true"> C. 属于半导体元器件</label>
+                <label><input type="radio" name="q17" value="D"> D. 只能发出白光</label>
+            </div>
+            <div class="explanation">解析：LED是半导体元器件，具有单向导通特性，且区分正负极。</div>
+        </div>
+
+        <div class="question" id="q18">
+            <p class="q-title">18. 正常情况下，我国家庭生活用电的电压是？</p>
+            <div class="options">
+                <label><input type="radio" name="q18" value="A"> A. 110V</label>
+                <label><input type="radio" name="q18" value="B" data-cor="true"> B. 220V</label>
+                <label><input type="radio" name="q18" value="C"> C. 380V</label>
+                <label><input type="radio" name="q18" value="D"> D. 36V</label>
+            </div>
+            <div class="explanation">解析：我国居民生活用电采用的是220V的交流电。</div>
+        </div>
+
+        <div class="question" id="q19">
+            <p class="q-title">19. Arduino IDE主要用于？</p>
+            <div class="options">
+                <label><input type="radio" name="q19" value="A"> A. 搭建电路硬件</label>
+                <label><input type="radio" name="q19" value="B" data-cor="true"> B. 程序的编写、调试和上传</label>
+                <label><input type="radio" name="q19" value="C"> C. 仅用于仿真测试</label>
+                <label><input type="radio" name="q19" value="D"> D. 制造主控板</label>
+            </div>
+            <div class="explanation">解析：Arduino IDE是官方的集成开发环境，负责软件开发流程。</div>
+        </div>
+
+        <div class="question" id="q20">
+            <p class="q-title">20. 下列物质中，属于导体的是？</p>
+            <div class="options">
+                <label><input type="radio" name="q20" value="A" data-cor="true"> A. 盐水</label>
+                <label><input type="radio" name="q20" value="B"> B. 玻璃</label>
+                <label><input type="radio" name="q20" value="C"> C. 橡胶</label>
+                <label><input type="radio" name="q20" value="D"> D. 干燥木棒</label>
+            </div>
+            <div class="explanation">解析：盐水含有离子可导电；玻璃、橡胶、干木头通常是绝缘体。</div>
+        </div>
+
+        <div class="question" id="q21">
+            <p class="q-title">21. 串联电路中，电流的特性是？</p>
+            <div class="options">
+                <label><input type="radio" name="q21" value="A"> A. 各处电流之和等于总电流</label>
+                <label><input type="radio" name="q21" value="B" data-cor="true"> B. 各处电流均相等</label>
+                <label><input type="radio" name="q21" value="C"> C. 电阻大的地方电流小</label>
+                <label><input type="radio" name="q21" value="D"> D. 电压高的地方电流大</label>
+            </div>
+            <div class="explanation">解析：串联电路中，各处的电流都是相等的。</div>
+        </div>
+
+        <div class="question" id="q22">
+            <p class="q-title">22. 有源蜂鸣器与无源蜂鸣器的主要区别在于？</p>
+            <div class="options">
+                <label><input type="radio" name="q22" value="A"> A. 是否需要外部电源</label>
+                <label><input type="radio" name="q22" value="B" data-cor="true"> B. 内部是否自带振荡源</label>
+                <label><input type="radio" name="q22" value="C"> C. 声音的大小</label>
+                <label><input type="radio" name="q22" value="D"> D. 引脚的数量</label>
+            </div>
+            <div class="explanation">解析：有源蜂鸣器内部自带振荡源，通电即可鸣叫。</div>
+        </div>
+
+        <div class="question" id="q23">
+            <p class="q-title">23. Mixly中，`Serial.print("a" + 1)` 打印的结果通常是？</p>
+            <div class="options">
+                <label><input type="radio" name="q23" value="A"> A. a</label>
+                <label><input type="radio" name="q23" value="B"> B. a1</label>
+                <label><input type="radio" name="q23" value="C" data-cor="true"> C. 对应ASCII码加1后的数字</label>
+                <label><input type="radio" name="q23" value="D"> D. 程序报错</label>
+            </div>
+            <div class="explanation">解析：字符'a'在运算时会转为ASCII码（97），加1后变为98，故输出数字。</div>
+        </div>
+
+        <div class="question" id="q24">
+            <p class="q-title">24. Arduino主控板中，用于保存上传的程序的存储器是？</p>
+            <div class="options">
+                <label><input type="radio" name="q24" value="A" data-cor="true"> A. Flash</label>
+                <label><input type="radio" name="q24" value="B"> B. SRAM</label>
+                <label><input type="radio" name="q24" value="C"> C. EEPROM</label>
+                <label><input type="radio" name="q24" value="D"> D. GPIO</label>
+            </div>
+            <div class="explanation">解析：Flash用于存放固件程序，断电不丢失。</div>
+        </div>
+
+        <div class="question" id="q25">
+            <p class="q-title">25. 下列属于“比较运算符”的是？</p>
+            <div class="options">
+                <label><input type="radio" name="q25" value="A"> A. +</label>
+                <label><input type="radio" name="q25" value="B" data-cor="true"> B. ==</label>
+                <label><input type="radio" name="q25" value="C"> C. 且</label>
+                <label><input type="radio" name="q25" value="D"> D. 非</label>
+            </div>
+            <div class="explanation">解析：“==”用于判断两边是否相等，属于比较（关系）运算。</div>
+        </div>
+
+        <div class="question" id="q26">
+            <p class="q-title">26. 正常情况下，一节5号干电池的电压是？</p>
+            <div class="options">
+                <label><input type="radio" name="q26" value="A"> A. 1.2V</label>
+                <label><input type="radio" name="q26" value="B" data-cor="true"> B. 1.5V</label>
+                <label><input type="radio" name="q26" value="C"> C. 3V</label>
+                <label><input type="radio" name="q26" value="D"> D. 9V</label>
+            </div>
+            <div class="explanation">解析：普通干电池的标准电压为1.5V。</div>
+        </div>
+
+        <div class="question" id="q27">
+            <p class="q-title">27. 下列引脚中，具有模拟输入功能的是？</p>
+            <div class="options">
+                <label><input type="radio" name="q27" value="A" data-cor="true"> A. A0</label>
+                <label><input type="radio" name="q27" value="B"> B. D2</label>
+                <label><input type="radio" name="q27" value="C"> C. D13</label>
+                <label><input type="radio" name="q27" value="D"> D. Vin</label>
+            </div>
+            <div class="explanation">解析：A0-A5是专用的模拟输入引脚。</div>
+        </div>
+
+        <div class="question" id="q28">
+            <p class="q-title">28. 想要实现“呼吸灯”效果，LED灯应连接在什么类型的引脚上？</p>
+            <div class="options">
+                <label><input type="radio" name="q28" value="A"> A. 普通数字引脚</label>
+                <label><input type="radio" name="q28" value="B" data-cor="true"> B. PWM引脚</label>
+                <label><input type="radio" name="q28" value="C"> C. 模拟输入引脚</label>
+                <label><input type="radio" name="q28" value="D"> D. 电源引脚</label>
+            </div>
+            <div class="explanation">解析：呼吸灯需要改变等效电压，必须使用带PWM功能的数字引脚。</div>
+        </div>
+
+        <div class="question" id="q29">
+            <p class="q-title">29. 在Mixly编程中，跳出当前循环的模块是？</p>
+            <div class="options">
+                <label><input type="radio" name="q29" value="A"> A. 跳到下一个循环</label>
+                <label><input type="radio" name="q29" value="B" data-cor="true"> B. 跳出循环</label>
+                <label><input type="radio" name="q29" value="C"> C. 停止程序</label>
+                <label><input type="radio" name="q29" value="D"> D. 延时</label>
+            </div>
+            <div class="explanation">解析：“跳出循环”模块用于终止整个循环体。</div>
+        </div>
+
+        <div class="question" id="q30">
+            <p class="q-title">30. Arduino主控板的Vin引脚建议输入电压范围通常是？</p>
+            <div class="options">
+                <label><input type="radio" name="q30" value="A"> A. 3.3V</label>
+                <label><input type="radio" name="q30" value="B"> B. 5V</label>
+                <label><input type="radio" name="q30" value="C" data-cor="true"> C. 7V~12V</label>
+                <label><input type="radio" name="q30" value="D"> D. 110V~220V</label>
+            </div>
+            <div class="explanation">解析：Vin引脚通过板载稳压器供电，建议范围为7V-12V。</div>
+        </div>
+
+    </form>
+
+    <button id="submit-btn" onclick="checkAnswers()">提交试卷</button>
+
+    <div id="result-box">
+        <p>您的得分：<span class="score" id="score-display">0</span> / 100</p>
+        <p id="stat-display"></p>
+        <p>正确答案和解析已在下方题目中显示。</p>
+    </div>
+
+    <script>
+        function checkAnswers() {
+            const totalQuestions = 30;
+            const pointsPerQuestion = 100 / totalQuestions;
+            let score = 0;
+            let correctCount = 0;
+
+            const questions = document.querySelectorAll('.question');
+            
+            questions.forEach((q, index) => {
+                const selected = q.querySelector('input:checked');
+                const correctAnswer = q.querySelector('input[data-cor="true"]');
+                const explanation = q.querySelector('.explanation');
+                
+                // 显示解析
+                explanation.style.display = 'block';
+
+                if (selected) {
+                    if (selected.dataset.cor === "true") {
+                        score += pointsPerQuestion;
+                        correctCount++;
+                        q.classList.add('status-correct');
+                    } else {
+                        q.classList.add('status-wrong');
+                    }
+                } else {
+                    q.classList.add('status-wrong'); // 未选按错处理
+                }
+                
+                // 标记正确选项的样式
+                correctAnswer.parentElement.style.color = '#27ae60';
+                correctAnswer.parentElement.style.fontWeight = 'bold';
+            });
+
+            // 显示统计
+            document.getElementById('result-box').style.display = 'block';
+            document.getElementById('score-display').innerText = Math.round(score);
+            document.getElementById('stat-display').innerText = `正确题数：${correctCount} | 错误题数：${totalQuestions - correctCount}`;
+            
+            // 滚动到结果
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        }
+    </script>
+</body>
+</html>
+
+

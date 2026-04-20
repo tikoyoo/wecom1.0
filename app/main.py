@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+import hashlib
 from urllib.parse import quote
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -72,6 +73,9 @@ H5_STUDENT_QUERY_LIMIT_SEC = 3600
 _h5_student_query_lock = asyncio.Lock()
 _h5_student_query_last_ts: dict[str, float] = {}
 _h5_student_last_name_by_src: dict[str, str] = {}
+
+EXAMS_DATA_DIR = Path(settings.data_dir) / "exams"
+EXAMS_META_PATH = EXAMS_DATA_DIR / "exams.json"
 
 
 def _wecom_text_has_side_effects(txt: str) -> bool:
@@ -2034,6 +2038,8 @@ async def admin_home(_user: str = Depends(require_admin)):
     <h2>管理后台</h2>
     <div class="card">
       <div><a href="/admin/docs">知识库管理</a></div>
+      <div><a href="/admin/exams">考试系统（主页/试卷上传）</a></div>
+      <div>考试系统入口：<code>/exam</code></div>
       <div><a href="/admin/chats">会话记录</a></div>
       <div><a href="/admin/reports">周报发送</a></div>
       <div><a href="/admin/external-contacts">外部联系人同步与匹配</a></div>
@@ -2051,6 +2057,211 @@ async def admin_home(_user: str = Depends(require_admin)):
 
 def _today_class_stats_cache_path() -> Path:
     return Path(settings.data_dir) / "today_class_stats_cache.json"
+
+
+def _ensure_exams_store() -> None:
+    EXAMS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not EXAMS_META_PATH.exists():
+        EXAMS_META_PATH.write_text("[]", encoding="utf-8")
+
+
+def _load_exams_meta() -> list[dict]:
+    _ensure_exams_store()
+    try:
+        raw = json.loads(EXAMS_META_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        raw = []
+    items: list[dict] = []
+    for x in raw or []:
+        if not isinstance(x, dict):
+            continue
+        eid = str(x.get("id") or "").strip()
+        title = str(x.get("title") or "").strip()
+        filename = Path(str(x.get("filename") or "")).name
+        uploaded_at = str(x.get("uploaded_at") or "")
+        if not eid or not filename:
+            continue
+        items.append(
+            {
+                "id": eid,
+                "title": title or Path(filename).stem,
+                "filename": filename,
+                "uploaded_at": uploaded_at,
+            }
+        )
+    return items
+
+
+def _save_exams_meta(items: list[dict]) -> None:
+    _ensure_exams_store()
+    EXAMS_META_PATH.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _safe_exam_filename(name: str) -> str:
+    base = Path(name or "").name
+    if not base:
+        base = f"exam-{int(time.time())}.html"
+    if not base.lower().endswith(".html"):
+        base += ".html"
+    return base
+
+
+def _exam_id_for_filename(filename: str) -> str:
+    return hashlib.sha1(filename.encode("utf-8")).hexdigest()[:12]
+
+
+def _inject_exam_redo_script(html_text: str, exam_id: str) -> str:
+    marker = "__EXAM_REDO_INJECTED__"
+    if marker in html_text:
+        return html_text
+    script = f"""
+<script>
+/* {marker} */
+(function() {{
+  var storageKey = "exam_submitted_" + {json.dumps(exam_id)};
+  function readBtnText(btn) {{
+    if (!btn) return "";
+    if (btn.tagName === "INPUT") return String(btn.value || "");
+    return String(btn.innerText || btn.textContent || "");
+  }}
+  function writeBtnText(btn, text) {{
+    if (!btn) return;
+    if (btn.tagName === "INPUT") btn.value = text;
+    else btn.textContent = text;
+  }}
+  function findSubmitButton() {{
+    var fixed = document.getElementById("btn-submit") || document.getElementById("submit-btn");
+    if (fixed) return fixed;
+    var btns = document.querySelectorAll("button, input[type='button'], input[type='submit']");
+    for (var i = 0; i < btns.length; i++) {{
+      var t = readBtnText(btns[i]).trim();
+      if (t.indexOf("提交") >= 0 || t.indexOf("试卷") >= 0 || t.indexOf("试题") >= 0) return btns[i];
+    }}
+    return null;
+  }}
+  function applyRedoState() {{
+    if (localStorage.getItem(storageKey) !== "1") return;
+    var btn = findSubmitButton();
+    if (!btn) return;
+    btn.disabled = false;
+    writeBtnText(btn, "重做试题");
+    btn.onclick = function(e) {{
+      e.preventDefault();
+      localStorage.removeItem(storageKey);
+      location.reload();
+    }};
+  }}
+  function bindSubmitWatcher() {{
+    document.addEventListener("click", function(e) {{
+      var target = e.target && e.target.closest ? e.target.closest("button, input[type='button'], input[type='submit']") : null;
+      if (!target) return;
+      var txt = readBtnText(target).trim();
+      if (txt.indexOf("重做试题") >= 0) return;
+      if (txt.indexOf("提交") < 0 && txt.indexOf("试卷") < 0 && txt.indexOf("试题") < 0) return;
+      setTimeout(function() {{
+        localStorage.setItem(storageKey, "1");
+        applyRedoState();
+      }}, 10);
+    }}, true);
+  }}
+  window.addEventListener("load", function() {{
+    bindSubmitWatcher();
+    applyRedoState();
+    setTimeout(applyRedoState, 250);
+  }});
+}})();
+</script>
+"""
+    lower = html_text.lower()
+    pos = lower.rfind("</body>")
+    if pos >= 0:
+        return html_text[:pos] + script + "\n" + html_text[pos:]
+    return html_text + "\n" + script
+
+
+def _render_exam_home(exams: list[dict]) -> str:
+    exams_json = json.dumps(exams, ensure_ascii=False)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>竞赛模拟考试系统</title>
+  <style>
+    :root {{ --sidebar-width: 280px; --primary-color: #2563eb; --bg-color: #f1f5f9; --text-main: #1e293b; }}
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-color); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }}
+    .sidebar {{ width: var(--sidebar-width); background: #1e293b; color: #fff; display: flex; flex-direction: column; box-shadow: 4px 0 10px rgba(0,0,0,0.1); }}
+    .sidebar-header {{ padding: 2rem 1.5rem; border-bottom: 1px solid #334155; }}
+    .sidebar-header h1 {{ font-size: 1.25rem; font-weight: 700; letter-spacing: 1px; }}
+    .exam-list {{ flex: 1; padding: 1rem 0; overflow-y: auto; }}
+    .exam-item {{ padding: 1rem 1.5rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 10px; border-left: 4px solid transparent; color: #94a3b8; }}
+    .exam-item:hover {{ background: #334155; color: #f8fafc; }}
+    .exam-item.active {{ background: #0f172a; color: #fff; border-left-color: var(--primary-color); }}
+    .main-content {{ flex: 1; display: flex; flex-direction: column; background: #fff; position: relative; }}
+    .top-bar {{ height: 60px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; padding: 0 2rem; justify-content: space-between; }}
+    #current-title {{ font-weight: 600; color: var(--text-main); }}
+    .iframe-container {{ flex: 1; width: 100%; height: 100%; border: none; background: var(--bg-color); }}
+    iframe {{ width: 100%; height: 100%; border: none; }}
+    .welcome-screen {{ position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #fff; z-index: 10; text-align: center; }}
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1>模拟考试系统</h1>
+      <p style="font-size: 0.8rem; color: #64748b; margin-top: 5px;">Exam Simulation System</p>
+    </div>
+    <div class="exam-list" id="examList"></div>
+  </div>
+  <div class="main-content">
+    <div class="top-bar">
+      <div id="current-title">请选择试卷</div>
+      <div style="font-size: 0.9rem; color: #64748b;">在线自测模式</div>
+    </div>
+    <div class="welcome-screen" id="welcome">
+      <div style="font-size: 4rem; margin-bottom: 1rem;">📝</div>
+      <h2>欢迎进入考试中心</h2>
+      <p style="color: #64748b; margin-top: 10px;">从左侧列表点击试卷开始答题</p>
+    </div>
+    <div class="iframe-container">
+      <iframe id="examFrame" src="about:blank"></iframe>
+    </div>
+  </div>
+  <script>
+    const exams = {exams_json};
+    const examListEl = document.getElementById("examList");
+    const examFrame = document.getElementById("examFrame");
+    const welcomeScreen = document.getElementById("welcome");
+    const currentTitleEl = document.getElementById("current-title");
+    function loadExam(el, examId, title) {{
+      document.querySelectorAll(".exam-item").forEach((item) => item.classList.remove("active"));
+      if (el) el.classList.add("active");
+      welcomeScreen.style.display = "none";
+      currentTitleEl.innerText = title;
+      examFrame.src = "/exam/paper/" + encodeURIComponent(examId);
+    }}
+    function init() {{
+      if (!exams.length) {{
+        examListEl.innerHTML = '<div style="padding:1rem 1.5rem;color:#cbd5e1">暂无试卷，请联系管理员在后台上传。</div>';
+        return;
+      }}
+      examListEl.innerHTML = exams.map((exam) =>
+        '<div class="exam-item" data-eid="' + exam.id + '"><span>📄</span><span>' + exam.title + "</span></div>"
+      ).join("");
+      document.querySelectorAll(".exam-item").forEach((item) => {{
+        item.addEventListener("click", function() {{
+          const eid = this.getAttribute("data-eid");
+          const e = exams.find((x) => x.id === eid);
+          if (!e) return;
+          loadExam(this, e.id, e.title);
+        }});
+      }});
+    }}
+    init();
+  </script>
+</body>
+</html>"""
 
 
 @app.get("/admin/today-class-stats", response_class=HTMLResponse)
@@ -2215,6 +2426,137 @@ async def admin_docs_upload(
     add_document_with_chunks(db, title=title.strip(), filename=file.filename or "upload", content=text)
     _rebuild_index(db)
     return Response(status_code=303, headers={"Location": "/admin/docs"})
+
+
+@app.get("/exam", response_class=HTMLResponse)
+@app.get("/exam/", response_class=HTMLResponse)
+async def exam_home():
+    exams = _load_exams_meta()
+    return HTMLResponse(_render_exam_home(exams))
+
+
+@app.get("/exam/paper/{exam_id}", response_class=HTMLResponse)
+async def exam_paper(exam_id: str):
+    eid = (exam_id or "").strip()
+    exams = _load_exams_meta()
+    row = next((x for x in exams if x.get("id") == eid), None)
+    if not row:
+        raise HTTPException(status_code=404, detail="exam not found")
+    fp = EXAMS_DATA_DIR / Path(str(row.get("filename") or "")).name
+    if not fp.exists():
+        raise HTTPException(status_code=404, detail="exam file not found")
+    raw = fp.read_text(encoding="utf-8", errors="ignore")
+    return HTMLResponse(_inject_exam_redo_script(raw, eid))
+
+
+@app.get("/admin/exams", response_class=HTMLResponse)
+async def admin_exams(_user: str = Depends(require_admin)):
+    exams = _load_exams_meta()
+    rows = "".join(
+        f"<tr>"
+        f"<td>{idx + 1}</td>"
+        f"<td>{html.escape(str(e.get('title') or ''))}</td>"
+        f"<td><code>{html.escape(str(e.get('filename') or ''))}</code></td>"
+        f"<td>{html.escape(str(e.get('uploaded_at') or ''))}</td>"
+        f"<td>"
+        f"<a href='/exam/paper/{html.escape(str(e.get('id') or ''), quote=True)}' target='_blank'>预览</a>"
+        f"<form action='/admin/exams/delete' method='post' style='display:inline;margin-left:8px'>"
+        f"<input type='hidden' name='exam_id' value='{html.escape(str(e.get('id') or ''), quote=True)}' />"
+        f"<button type='submit' class='secondary'>删除</button></form>"
+        f"</td>"
+        f"</tr>"
+        for idx, e in enumerate(exams)
+    )
+    body = f"""
+    <h2>考试系统（主页与试卷管理）</h2>
+    <div class="card">
+      <div>考试主页入口：<a href="/exam" target="_blank"><code>/exam</code></a></div>
+      <div style="margin-top:6px;color:#666">试卷要求：上传 HTML 文件即可，页面结构与初赛一/二/三保持一致即可自动接入。</div>
+    </div>
+    <div class="card">
+      <form action="/admin/exams/upload" method="post" enctype="multipart/form-data">
+        <div style="margin-bottom:10px">
+          <label>试卷标题</label>
+          <input name="title" placeholder="例如：初赛模拟测试（四）" />
+        </div>
+        <div style="margin-bottom:10px">
+          <label>试卷文件（.html）</label>
+          <input type="file" name="file" accept=".html,text/html" />
+        </div>
+        <button type="submit">上传并加入主页</button>
+      </form>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>#</th><th>标题</th><th>文件名</th><th>上传时间</th><th>操作</th></tr></thead>
+        <tbody>{rows or '<tr><td colspan="5">暂无试卷，请先上传。</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div><a href="/admin/">返回</a></div>
+    """
+    return html_page("Exams", body)
+
+
+@app.post("/admin/exams/upload")
+async def admin_exams_upload(
+    title: str = Form(""),
+    file: UploadFile = File(...),
+    _user: str = Depends(require_admin),
+):
+    src_name = file.filename or "exam.html"
+    safe_name = _safe_exam_filename(src_name)
+    data = await file.read()
+    if not safe_name.lower().endswith(".html"):
+        raise HTTPException(status_code=400, detail="only html allowed")
+    _ensure_exams_store()
+    fp = EXAMS_DATA_DIR / safe_name
+    fp.write_bytes(data)
+
+    exams = _load_exams_meta()
+    exam_id = _exam_id_for_filename(safe_name)
+    exam_title = (title or "").strip() or Path(safe_name).stem
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    existed = False
+    for e in exams:
+        if e.get("id") == exam_id:
+            e["title"] = exam_title
+            e["filename"] = safe_name
+            e["uploaded_at"] = now
+            existed = True
+            break
+    if not existed:
+        exams.append(
+            {
+                "id": exam_id,
+                "title": exam_title,
+                "filename": safe_name,
+                "uploaded_at": now,
+            }
+        )
+    _save_exams_meta(exams)
+    return Response(status_code=303, headers={"Location": "/admin/exams"})
+
+
+@app.post("/admin/exams/delete")
+async def admin_exams_delete(
+    exam_id: str = Form(...),
+    _user: str = Depends(require_admin),
+):
+    eid = (exam_id or "").strip()
+    exams = _load_exams_meta()
+    kept: list[dict] = []
+    to_delete: list[str] = []
+    for e in exams:
+        if str(e.get("id") or "") == eid:
+            to_delete.append(Path(str(e.get("filename") or "")).name)
+            continue
+        kept.append(e)
+    for name in to_delete:
+        fp = EXAMS_DATA_DIR / name
+        if fp.exists():
+            fp.unlink(missing_ok=True)
+    _save_exams_meta(kept)
+    return Response(status_code=303, headers={"Location": "/admin/exams"})
 
 
 @app.get("/admin/chats", response_class=HTMLResponse)

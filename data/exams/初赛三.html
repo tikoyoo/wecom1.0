@@ -1,0 +1,430 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>CIE 机器人三级理论模拟测试 - 第三套</title>
+    <style>
+        body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; background-color: #eef2f7; color: #333; line-height: 1.6; padding: 20px; max-width: 950px; margin: auto; }
+        h1 { text-align: center; color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        .info-panel { background: #fff; padding: 15px; border-radius: 10px; margin-bottom: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-left: 8px solid #3498db; }
+        .question-card { background: #fff; padding: 25px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); transition: 0.3s; border: 1px solid #eee; }
+        .question-card:hover { transform: translateY(-3px); box-shadow: 0 6px 15px rgba(0,0,0,0.1); }
+        .q-text { font-size: 1.1em; font-weight: bold; margin-bottom: 15px; color: #34495e; }
+        .options-group label { display: block; padding: 12px; margin: 8px 0; border: 1px solid #ebedef; border-radius: 8px; cursor: pointer; transition: 0.2s; background: #fdfdfe; }
+        .options-group label:hover { background-color: #f0f7ff; border-color: #3498db; }
+        .options-group input { margin-right: 12px; transform: scale(1.2); }
+        .exp-box { display: none; margin-top: 15px; padding: 15px; background: #f0f9ff; border-left: 5px solid #3498db; border-radius: 4px; font-size: 0.95em; color: #2980b9; }
+        #submit-area { position: sticky; bottom: 20px; text-align: center; z-index: 100; }
+        #btn-submit { padding: 15px 50px; font-size: 1.2em; background: #3498db; color: #fff; border: none; border-radius: 30px; cursor: pointer; box-shadow: 0 4px 15px rgba(52,152,219,0.4); }
+        #btn-submit:hover { background: #2980b9; }
+        #score-board { display: none; background: #fff; padding: 30px; border-radius: 15px; text-align: center; margin-top: 30px; border: 3px solid #2ecc71; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+        .score-num { font-size: 3.5em; color: #e74c3c; font-weight: 900; }
+        .q-correct { border: 2px solid #2ecc71 !important; background-color: #f1fdf6 !important; }
+        .q-wrong { border: 2px solid #e74c3c !important; background-color: #fef5f5 !important; }
+        .ans-highlight { color: #27ae60; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>CIE 机器人三级理论模拟测试（第三套）</h1>
+    <div class="info-panel">
+        <p><strong>考卷信息：</strong>本套试卷共 30 题，总分 100 分。侧重考察：复杂逻辑控制、传感器时序、电路原理分析及人工智能前沿知识。</p>
+    </div>
+
+    <form id="examForm">
+        <!-- 题目 1-30 -->
+        <div class="question-card">
+            <p class="q-text">1. 在流程图中，表示“处理/运算”过程的符号是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q1" value="A"> A. 菱形</label>
+                <label><input type="radio" name="q1" value="B" data-cor="true"> B. 矩形</label>
+                <label><input type="radio" name="q1" value="C"> C. 平行四边形</label>
+                <label><input type="radio" name="q1" value="D"> D. 圆角矩形</label>
+            </div>
+            <div class="exp-box">解析：矩形代表处理，菱形代表判断，平行四边形代表输入/输出。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">2. 超声波传感器 HC-SR04 工作时，Trig 引脚的主要作用是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q2" value="A"> A. 输出检测到的距离</label>
+                <label><input type="radio" name="q2" value="B" data-cor="true"> B. 接收来自主控板的触发信号</label>
+                <label><input type="radio" name="q2" value="C"> C. 接收障碍物反射的回响</label>
+                <label><input type="radio" name="q2" value="D"> D. 给传感器供电</label>
+            </div>
+            <div class="exp-box">解析：Trig 引脚用于接收触发信号以启动探测，Echo 引脚用于返回距离数据。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">3. 在 Mixly 编程中，若变量 val 初始值为 0，执行模块 `约束 val 介于 10 和 20` 后，val 的结果是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q3" value="A"> A. 0</label>
+                <label><input type="radio" name="q3" value="B" data-cor="true"> B. 10</label>
+                <label><input type="radio" name="q3" value="C"> C. 20</label>
+                <label><input type="radio" name="q3" value="D"> D. 不确定</label>
+            </div>
+            <div class="exp-box">解析：约束模块会将超出范围的值限制在边界值。0 小于最小值 10，故返回 10。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">4. 下列选项中，属于模拟信号物理量的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q4" value="A"> A. 考场里的学生人数</label>
+                <label><input type="radio" name="q4" value="B"> B. 电路的开关状态（开/关）</label>
+                <label><input type="radio" name="q4" value="C" data-cor="true"> C. 杯中热水温度的变化过程</label>
+                <label><input type="radio" name="q4" value="D"> D. 掷硬币的正反面</label>
+            </div>
+            <div class="exp-box">解析：模拟信号是连续变化的物理量，如温度、光强；数字信号是离散的。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">5. 我国家庭电路（居民生活用电）提供的电压标准是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q5" value="A"> A. 110V 交流电</label>
+                <label><input type="radio" name="q5" value="B"> B. 220V 直流电</label>
+                <label><input type="radio" name="q5" value="C" data-cor="true"> C. 220V 交流电</label>
+                <label><input type="radio" name="q5" value="D"> D. 380V 交流电</label>
+            </div>
+            <div class="exp-box">解析：我国居民生活用电统一采用 220V 交流电。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">6. 在 Mixly 中，`字节（Byte）` 类型变量能够存储的最大整数值是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q6" value="A"> A. 127</label>
+                <label><input type="radio" name="q6" value="B" data-cor="true"> B. 255</label>
+                <label><input type="radio" name="q6" value="C"> C. 1023</label>
+                <label><input type="radio" name="q6" value="D"> D. 65535</label>
+            </div>
+            <div class="exp-box">解析：字节型变量占 8 位，取值范围通常为 0~255。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">7. 有关电路搭设，下列做法中错误的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q7" value="A"> A. 通电前应先检查电路是否存在短路</label>
+                <label><input type="radio" name="q7" value="B" data-cor="true"> B. 电路运行过程中可以随意插拔元器件</label>
+                <label><input type="radio" name="q7" value="C"> C. 使用 LED 灯时通常需要串联限流电阻</label>
+                <label><input type="radio" name="q7" value="D"> D. 保持实验台干燥，防止意外导电</label>
+            </div>
+            <div class="exp-box">解析：电路运行中严禁带电插拔，以免损坏元器件。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">8. 关于并联电路，下列说法正确的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q8" value="A" data-cor="true"> B. 各支路两端的电压均相等</label>
+                <label><input type="radio" name="q8" value="B"> A. 总电阻等于各支路电阻之和</label>
+                <label><input type="radio" name="q8" value="C"> C. 一处支路断开，整个电路将彻底不通</label>
+                <label><input type="radio" name="q8" value="D"> D. 总电流等于各支路电流的乘积</label>
+            </div>
+            <div class="exp-box">解析：并联电路各节点电压相等，干路电流等于支路电流之和。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">9. 程序模块 `i = i % 3`，若 i 当前值为 10，运算后 i 的值是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q9" value="A"> A. 3</label>
+                <label><input type="radio" name="q9" value="B" data-cor="true"> B. 1</label>
+                <label><input type="radio" name="q9" value="C"> C. 0</label>
+                <label><input type="radio" name="q9" value="D"> D. 3.33</label>
+            </div>
+            <div class="exp-box">解析：`%` 是取余运算。10 除以 3 的余数是 1。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">10. 下列不属于电子学中常用物理单位的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q10" value="A"> A. 伏特 (V)</label>
+                <label><input type="radio" name="q10" value="B"> B. 安培 (A)</label>
+                <label><input type="radio" name="q10" value="C" data-cor="true"> C. 牛顿 (N)</label>
+                <label><input type="radio" name="q10" value="D"> D. 欧姆 (Ω)</label>
+            </div>
+            <div class="exp-box">解析：牛顿是力学单位，不是电学单位。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">11. 在 Mixly 中，“跳到下一个循环（continue）”模块的作用是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q11" value="A"> A. 彻底终止整个循环程序</label>
+                <label><input type="radio" name="q11" value="B" data-cor="true"> B. 结束本次迭代，直接开始下一次判断/循环</label>
+                <label><input type="radio" name="q11" value="C"> C. 跳出当前的 if 判断结构</label>
+                <label><input type="radio" name="q11" value="D"> D. 重启整个主控板</label>
+            </div>
+            <div class="exp-box">解析：该模块用于中断当前循环体内的剩余语句，直接进入下一轮循环。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">12. Arduino 主控板的存储器中，用于存放“不可修改”的出厂引导程序的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q12" value="A"> A. SRAM</label>
+                <label><input type="radio" name="q12" value="B" data-cor="true"> B. Bootloader (通常在Flash中)</label>
+                <label><input type="radio" name="q12" value="C"> C. EEPROM</label>
+                <label><input type="radio" name="q12" value="D"> D. GPIO</label>
+            </div>
+            <div class="exp-box">解析：Flash 用于长期存放代码。Bootloader 是预置的引导程序。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">13. 下列物质中，属于“半导体”元器件核心材料的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q13" value="A"> A. 橡胶</label>
+                <label><input type="radio" name="q13" value="B" data-cor="true"> B. 硅 (Silicon)</label>
+                <label><input type="radio" name="q13" value="C"> C. 铜</label>
+                <label><input type="radio" name="q13" value="D"> D. 玻璃</label>
+            </div>
+            <div class="exp-box">解析：LED 和三极管等半导体元器件的核心材料通常是硅。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">14. 模块 `映射 i 从  到 `，当 i=255 时返回值是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q14" value="A"> A. 0</label>
+                <label><input type="radio" name="q14" value="B"> B. 1023</label>
+                <label><input type="radio" name="q14" value="C" data-cor="true"> C. 512</label>
+                <label><input type="radio" name="q14" value="D"> D. 255</label>
+            </div>
+            <div class="exp-box">解析：映射是两端对应的线性变换。原范围终点 255 对应新范围终点 512。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">15. 在电路原理图中，标识为符号“~”的引脚通常表示？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q15" value="A"> A. 接地引脚</label>
+                <label><input type="radio" name="q15" value="B"> B. 模拟输入引脚</label>
+                <label><input type="radio" name="q15" value="C" data-cor="true"> C. 支持脉冲宽度调制（PWM）的引脚</label>
+                <label><input type="radio" name="q15" value="D"> D. 电源输入引脚</label>
+            </div>
+            <div class="exp-box">解析：Arduino 板上带有 ~ 标志的引脚（如 3,5,6,9,10,11）具有模拟输出（PWM）功能。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">16. Switch-Case 结构中，`default` 语句块的作用是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q16" value="A"> A. 必须作为第一条执行的语句</label>
+                <label><input type="radio" name="q16" value="B" data-cor="true"> B. 当所有 case 情况都不匹配时执行该块</label>
+                <label><input type="radio" name="q16" value="C"> C. 用于跳出当前整个分支</label>
+                <label><input type="radio" name="q16" value="D"> D. 声明一个新的变量</label>
+            </div>
+            <div class="exp-box">解析：default 类似于 if 结构中的 else，处理兜底逻辑。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">17. 想要通过串口监视器实时打印电位器的数值（0-1023），以下做法错误的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q17" value="A"> A. 将电位器连接在 A0 引脚</label>
+                <label><input type="radio" name="q17" value="B"> B. 在初始化中设置串口波特率</label>
+                <label><input type="radio" name="q17" value="C" data-cor="true"> C. 使用“数字输入引脚 A0”模块进行读取</label>
+                <label><input type="radio" name="q17" value="D"> D. 使用“模拟输入引脚 A0”模块进行读取</label>
+            </div>
+            <div class="exp-box">解析：读取电位器等传感器模拟值必须使用“模拟输入”模块；“数字输入”只能得到 0 或 1。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">18. 下列关于“短路”的说法，正确的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q18" value="A"> A. 短路是电路的一种正常工作状态</label>
+                <label><input type="radio" name="q18" value="B"> B. 短路时电路中没有电流产生</label>
+                <label><input type="radio" name="q18" value="C" data-cor="true"> C. 短路会导致电流极大，可能烧毁电源或导线</label>
+                <label><input type="radio" name="q18" value="D"> D. 只要有电阻存在，就不可能发生短路</label>
+            </div>
+            <div class="exp-box">解析：短路是指电源两极直接相连，电流会急剧增加产生大量热。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">19. 电子元器件引脚标识为“VCC”或“+5V”时，通常应连接到？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q19" value="A" data-cor="true"> A. 电源正极</label>
+                <label><input type="radio" name="q19" value="B"> B. 电源负极（地）</label>
+                <label><input type="radio" name="q19" value="C"> C. 任意数字引脚</label>
+                <label><input type="radio" name="q19" value="D"> D. 串口接收端</label>
+            </div>
+            <div class="exp-box">解析：VCC 代表电源正极，GND 代表电源负极。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">20. 2022 年掀起全球热潮的人工智能模型 ChatGPT 是由哪家机构开发的？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q20" value="A"> A. Google (谷歌)</label>
+                <label><input type="radio" name="q20" value="B" data-cor="true"> B. OpenAI</label>
+                <label><input type="radio" name="q20" value="C"> C. Microsoft (微软)</label>
+                <label><input type="radio" name="q20" value="D"> D. Meta (脸书)</label>
+            </div>
+            <div class="exp-box">解析：ChatGPT 是 OpenAI 发布的聊天机器人模型。</div>
+        </div>
+
+        <!-- 由于篇幅限制，这里补充完整逻辑题目直至 30 题 -->
+        <div class="question-card">
+            <p class="q-text">21. 在 Mixly 中，逻辑运算 `真 且 假` 的运算结果是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q21" value="A"> A. 真</label>
+                <label><input type="radio" name="q21" value="B" data-cor="true"> B. 假</label>
+                <label><input type="radio" name="q21" value="C"> C. 1</label>
+                <label><input type="radio" name="q21" value="D"> D. 不确定</label>
+            </div>
+            <div class="exp-box">解析：“且”运算要求两边都为真结果才为真。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">22. 下列选项中，最适合用于保护电路中 LED 灯不被大电流烧坏的元件是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q22" value="A"> A. 电位器</label>
+                <label><input type="radio" name="q22" value="B"> B. 超声波传感器</label>
+                <label><input type="radio" name="q22" value="C" data-cor="true"> C. 固定阻值的电阻</label>
+                <label><input type="radio" name="q22" value="D"> D. 按钮开关</label>
+            </div>
+            <div class="exp-box">解析：电阻在电路中起到限流和分压的作用。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">23. 循环结构 `使用 i 从 1 到 10 步长为 3`，该循环体会执行多少次？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q23" value="A"> A. 3次</label>
+                <label><input type="radio" name="q23" value="B" data-cor="true"> B. 4次</label>
+                <label><input type="radio" name="q23" value="C"> C. 10次</label>
+                <label><input type="radio" name="q23" value="D"> D. 0次</label>
+            </div>
+            <div class="exp-box">解析：执行过程为 i=1, 4, 7, 10。共 4 次。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">24. 在 Arduino IDE 中，若要在串口打印后自动开启新的一行，应使用哪个指令？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q24" value="A"> A. Serial.print()</label>
+                <label><input type="radio" name="q24" value="B" data-cor="true"> B. Serial.println()</label>
+                <label><input type="radio" name="q24" value="C"> C. Serial.begin()</label>
+                <label><input type="radio" name="q24" value="D"> D. Serial.read()</label>
+            </div>
+            <div class="exp-box">解析：`println` 带有换行符，对应 Mixly 中的“自动换行”。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">25. 下列哪个符号常用于表示电流的单位？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q25" value="A" data-cor="true"> A. A (安培)</label>
+                <label><input type="radio" name="q25" value="B"> B. V (伏特)</label>
+                <label><input type="radio" name="q25" value="C"> C. Ω (欧姆)</label>
+                <label><input type="radio" name="q25" value="D"> D. W (瓦特)</label>
+            </div>
+            <div class="exp-box">解析：电流单位是安培，符号 A；电压是 V；电阻是 Ω。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">26. 将光敏电阻接在主控板上，其阻值变化遵循？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q26" value="A"> A. 光照越强，阻值越大</label>
+                <label><input type="radio" name="q26" value="B" data-cor="true"> B. 光照越强，阻值越小</label>
+                <label><input type="radio" name="q26" value="C"> C. 阻值恒定不变</label>
+                <label><input type="radio" name="q26" value="D"> D. 与光照无关</label>
+            </div>
+            <div class="exp-box">解析：光敏电阻对光敏感，光强增加则阻值下降。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">27. 下列引脚中，具有模拟信号输入功能（ADC）的引脚是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q27" value="A" data-cor="true"> A. A0</label>
+                <label><input type="radio" name="q27" value="B"> B. D2</label>
+                <label><input type="radio" name="q27" value="C"> C. 13号引脚</label>
+                <label><input type="radio" name="q27" value="D"> D. Vin</label>
+            </div>
+            <div class="exp-box">解析：A0-A5 是专门的模拟输入端口。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">28. 在电路连接中，导线外层包裹的塑料主要起到什么作用？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q28" value="A"> A. 让导线更美观</label>
+                <label><input type="radio" name="q28" value="B"> B. 增加电流的大小</label>
+                <label><input type="radio" name="q28" value="C" data-cor="true"> C. 绝缘并防止短路或触电</label>
+                <label><input type="radio" name="q28" value="D"> D. 提高导线的电阻</label>
+            </div>
+            <div class="exp-box">解析：塑料是绝缘体，能防止电流外泄。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">29. 想要实现“红、黄、绿”三盏灯依次点亮的逻辑，应采用哪种基础程序结构？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q29" value="A" data-cor="true"> A. 顺序结构</label>
+                <label><input type="radio" name="q29" value="B"> B. 选择结构</label>
+                <label><input type="radio" name="q29" value="C"> C. 循环结构</label>
+                <label><input type="radio" name="q29" value="D"> D. 随机结构</label>
+            </div>
+            <div class="exp-box">解析：依次执行的任务属于顺序结构。</div>
+        </div>
+
+        <div class="question-card">
+            <p class="q-text">30. 2026年4月20日（假设日期）正在进行的一场机器人三级理论考试中，下列叙述错误的是？</p>
+            <div class="options-group">
+                <label><input type="radio" name="q30" value="A"> A. 保持诚实守信是考试的基本准则</label>
+                <label><input type="radio" name="q30" value="B"> B. 理论考试通过后方可进行实操验证</label>
+                <label><input type="radio" name="q30" value="C" data-cor="true"> C. 给主控板通电时电压越高程序运行越快</label>
+                <label><input type="radio" name="q30" value="D"> D. 合理安排答题时间非常重要</label>
+            </div>
+            <div class="exp-box">解析：电压过高会烧坏主控板，主频是由晶振决定的（16MHz），与输入电压无关。</div>
+        </div>
+
+    </form>
+
+    <div id="submit-area">
+        <button id="btn-submit" onclick="grade()">提交试卷</button>
+    </div>
+
+    <div id="score-board">
+        <p>🎉 恭喜完成测试！</p>
+        <p>您的总得分：<span class="score-num" id="finalScore">0</span> / 100</p>
+        <p id="statDetail"></p>
+        <p style="color: #666; margin-top: 10px;">(详细解析已在上方各题底部展示)</p>
+    </div>
+
+    <script>
+        function grade() {
+            const totalQ = 30;
+            const pointsPerQ = 100 / totalQ;
+            let correctCount = 0;
+            let score = 0;
+
+            const cards = document.querySelectorAll('.question-card');
+            
+            cards.forEach((card, index) => {
+                const selected = card.querySelector('input:checked');
+                const correctOption = card.querySelector('input[data-cor="true"]');
+                const exp = card.querySelector('.exp-box');
+                
+                // 显示解析
+                exp.style.display = 'block';
+
+                if (selected) {
+                    if (selected.dataset.cor === "true") {
+                        correctCount++;
+                        score += pointsPerQ;
+                        card.classList.add('q-correct');
+                    } else {
+                        card.classList.add('q-wrong');
+                    }
+                } else {
+                    card.classList.add('q-wrong');
+                }
+
+                // 高亮标出正确答案
+                correctOption.parentElement.innerHTML += ' <span class="ans-highlight">← 正确答案</span>';
+            });
+
+            // 结果展示
+            const board = document.getElementById('score-board');
+            board.style.display = 'block';
+            document.getElementById('finalScore').innerText = Math.round(score);
+            document.getElementById('statDetail').innerText = `正确：${correctCount} 题 | 错误：${totalQ - correctCount} 题`;
+            
+            // 禁用提交按钮防止重复
+            document.getElementById('btn-submit').disabled = true;
+            document.getElementById('btn-submit').style.background = "#bdc3c7";
+            document.getElementById('btn-submit').innerText = "已提交";
+
+            // 平滑滚动到顶部
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        }
+    </script>
+</body>
+</html>
