@@ -2191,7 +2191,8 @@ def _render_exam_home(exams: list[dict]) -> str:
     :root {{ --sidebar-width: 280px; --primary-color: #2563eb; --bg-color: #f1f5f9; --text-main: #1e293b; }}
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-color); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }}
-    .sidebar {{ width: var(--sidebar-width); background: #1e293b; color: #fff; display: flex; flex-direction: column; box-shadow: 4px 0 10px rgba(0,0,0,0.1); }}
+    .sidebar {{ width: var(--sidebar-width); background: #1e293b; color: #fff; display: flex; flex-direction: column; box-shadow: 4px 0 10px rgba(0,0,0,0.1); transition: width 0.2s ease, transform 0.2s ease; overflow: hidden; }}
+    .sidebar.collapsed {{ width: 0; transform: translateX(-100%); box-shadow: none; }}
     .sidebar-header {{ padding: 2rem 1.5rem; border-bottom: 1px solid #334155; }}
     .sidebar-header h1 {{ font-size: 1.25rem; font-weight: 700; letter-spacing: 1px; }}
     .exam-list {{ flex: 1; padding: 1rem 0; overflow-y: auto; }}
@@ -2200,6 +2201,9 @@ def _render_exam_home(exams: list[dict]) -> str:
     .exam-item.active {{ background: #0f172a; color: #fff; border-left-color: var(--primary-color); }}
     .main-content {{ flex: 1; display: flex; flex-direction: column; background: #fff; position: relative; }}
     .top-bar {{ height: 60px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; padding: 0 2rem; justify-content: space-between; }}
+    .top-left {{ display: flex; align-items: center; gap: 10px; }}
+    .sidebar-toggle {{ border: 1px solid #1d4ed8; background: #2563eb; color: #fff; border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; }}
+    .sidebar-toggle:hover {{ background: #1d4ed8; }}
     #current-title {{ font-weight: 600; color: var(--text-main); }}
     .iframe-container {{ flex: 1; width: 100%; height: 100%; border: none; background: var(--bg-color); }}
     iframe {{ width: 100%; height: 100%; border: none; }}
@@ -2207,7 +2211,7 @@ def _render_exam_home(exams: list[dict]) -> str:
   </style>
 </head>
 <body>
-  <div class="sidebar">
+  <div class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <h1>模拟考试系统</h1>
       <p style="font-size: 0.8rem; color: #64748b; margin-top: 5px;">Exam Simulation System</p>
@@ -2216,7 +2220,10 @@ def _render_exam_home(exams: list[dict]) -> str:
   </div>
   <div class="main-content">
     <div class="top-bar">
-      <div id="current-title">请选择试卷</div>
+      <div class="top-left">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button">隐藏左栏</button>
+        <div id="current-title">请选择试卷</div>
+      </div>
       <div style="font-size: 0.9rem; color: #64748b;">在线自测模式</div>
     </div>
     <div class="welcome-screen" id="welcome">
@@ -2230,16 +2237,34 @@ def _render_exam_home(exams: list[dict]) -> str:
   </div>
   <script>
     const exams = {exams_json};
+    const sidebarEl = document.getElementById("sidebar");
+    const sidebarToggleBtn = document.getElementById("sidebarToggle");
     const examListEl = document.getElementById("examList");
     const examFrame = document.getElementById("examFrame");
     const welcomeScreen = document.getElementById("welcome");
     const currentTitleEl = document.getElementById("current-title");
+    let sidebarCollapsed = false;
+    function setSidebarCollapsed(nextCollapsed) {{
+      sidebarCollapsed = !!nextCollapsed;
+      if (sidebarCollapsed) {{
+        sidebarEl.classList.add("collapsed");
+        sidebarToggleBtn.textContent = "显示左栏";
+      }} else {{
+        sidebarEl.classList.remove("collapsed");
+        sidebarToggleBtn.textContent = "隐藏左栏";
+      }}
+    }}
+    sidebarToggleBtn.addEventListener("click", function() {{
+      setSidebarCollapsed(!sidebarCollapsed);
+    }});
     function loadExam(el, examId, title) {{
       document.querySelectorAll(".exam-item").forEach((item) => item.classList.remove("active"));
       if (el) el.classList.add("active");
       welcomeScreen.style.display = "none";
       currentTitleEl.innerText = title;
       examFrame.src = "/exam/paper/" + encodeURIComponent(examId);
+      // 点击试题后自动收起左栏，给答题区域更大空间
+      setSidebarCollapsed(true);
     }}
     function init() {{
       if (!exams.length) {{
