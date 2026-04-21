@@ -16,6 +16,7 @@
         .explanation { display: none; margin-top: 15px; padding: 12px; background: #e7f3ff; border-left: 4px solid #1a73e8; font-size: 0.95em; }
         #btn-submit { display: block; width: 220px; height: 50px; margin: 30px auto; background: #1a73e8; color: #fff; border: none; border-radius: 25px; font-size: 1.1em; cursor: pointer; transition: 0.3s; }
         #btn-submit:hover { background: #1765cf; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }
+        #btn-submit.exam-btn-redo { background: #bdc3c7 !important; color: #fff !important; cursor: pointer; box-shadow: none !important; }
         #result-box { display: none; background: #fff; padding: 25px; border-radius: 8px; text-align: center; margin-top: 20px; border: 2px solid #1a73e8; }
         .score-val { font-size: 2.5em; color: #d93025; font-weight: bold; }
         .status-correct { border: 2px solid #34a853 !important; background-color: #e6f4ea !important; }
@@ -365,7 +366,7 @@
     </form>
 
     <div id="submit-area" style="text-align:center">
-        <button type="button" id="btn-submit" onclick="gradeQuiz()">提交试卷并显示解析</button>
+        <button type="button" id="btn-submit">提交试卷</button>
     </div>
 
     <div id="result-box">
@@ -376,60 +377,116 @@
     </div>
 
     <script>
-        function gradeQuiz() {
-            const total = 30;
-            const scorePerQ = 100 / total;
-            let score = 0;
-            let correctCount = 0;
+(function () {
+  var BTN_SUBMIT = '提交试卷';
+  var BTN_REDO = '重做试题';
+  var busy = false;
 
-            const questions = document.querySelectorAll('.question');
-            
-            questions.forEach((q) => {
-                const selected = q.querySelector('input:checked');
-                const correctOption = q.querySelector('input[data-cor="true"]');
-                const explanation = q.querySelector('.explanation');
-                
-                // 显示解析
-                explanation.style.display = 'block';
+  function getBtn() { return document.getElementById('btn-submit'); }
 
-                // 移除旧样式
-                q.classList.remove('status-correct', 'status-wrong');
-                
-                if (selected) {
-                    if (selected.dataset.cor === "true") {
-                        score += scorePerQ;
-                        correctCount++;
-                        q.classList.add('status-correct');
-                    } else {
-                        q.classList.add('status-wrong');
-                    }
-                } else {
-                    q.classList.add('status-wrong');
-                }
-                
-                // 高亮正确选项
-                if (correctOption && correctOption.parentElement) {
-                    correctOption.parentElement.style.color = '#188038';
-                    correctOption.parentElement.style.fontWeight = 'bold';
-                }
-            });
+  function setBtnRedo() {
+    var b = getBtn();
+    if (!b) return;
+    b.textContent = BTN_REDO;
+    b.classList.add('exam-btn-redo');
+  }
 
-            // 结果统计显示
-            const resBox = document.getElementById('result-box');
-            resBox.style.display = 'block';
-            document.getElementById('score-display').innerText = Math.round(score);
-            document.getElementById('stat-display').innerText = `正确：${correctCount} 题 | 错误/未答：${total - correctCount} 题`;
-            
-            // 自动跳转到结果区域
-            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  function setBtnSubmit() {
+    var b = getBtn();
+    if (!b) return;
+    b.textContent = BTN_SUBMIT;
+    b.classList.remove('exam-btn-redo');
+  }
 
-            var sb = document.getElementById('btn-submit');
-            if (sb) {
-                sb.disabled = true;
-                sb.style.background = '#bdc3c7';
-                sb.innerText = '已提交';
-            }
+  function resetExam() {
+    var form = document.getElementById('quizForm');
+    if (form) form.reset();
+    document.querySelectorAll('.question').forEach(function (q) {
+      q.classList.remove('status-correct', 'status-wrong');
+      q.querySelectorAll('.options label').forEach(function (lab) {
+        lab.style.color = '';
+        lab.style.fontWeight = '';
+      });
+      var ex = q.querySelector('.explanation');
+      if (ex) ex.style.display = 'none';
+    });
+    var box = document.getElementById('result-box');
+    if (box) box.style.display = 'none';
+  }
+
+  function runGrade() {
+    var total = 30;
+    var scorePerQ = 100 / total;
+    var score = 0;
+    var correctCount = 0;
+    document.querySelectorAll('.question').forEach(function (q) {
+      var selected = q.querySelector('input:checked');
+      var correctOption = q.querySelector('input[data-cor="true"]');
+      var explanation = q.querySelector('.explanation');
+      if (explanation) explanation.style.display = 'block';
+      q.classList.remove('status-correct', 'status-wrong');
+      if (selected) {
+        if (selected.getAttribute('data-cor') === 'true') {
+          score += scorePerQ;
+          correctCount++;
+          q.classList.add('status-correct');
+        } else {
+          q.classList.add('status-wrong');
         }
+      } else {
+        q.classList.add('status-wrong');
+      }
+      if (correctOption && correctOption.parentElement) {
+        correctOption.parentElement.style.color = '#188038';
+        correctOption.parentElement.style.fontWeight = 'bold';
+      }
+    });
+    var resBox = document.getElementById('result-box');
+    if (resBox) {
+      resBox.style.display = 'block';
+      resBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    var sd = document.getElementById('score-display');
+    if (sd) sd.textContent = String(Math.round(score));
+    var st = document.getElementById('stat-display');
+    if (st) st.textContent = '正确：' + correctCount + ' 题 | 错误/未答：' + (total - correctCount) + ' 题';
+  }
+
+  function onBtnClick(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (busy) return;
+    var b = getBtn();
+    if (!b) return;
+    var label = (b.textContent || '').trim();
+    if (label === BTN_REDO) {
+      busy = true;
+      try {
+        resetExam();
+        setBtnSubmit();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } finally {
+        busy = false;
+      }
+      return;
+    }
+    if (label !== BTN_SUBMIT) return;
+    busy = true;
+    try {
+      runGrade();
+      setBtnRedo();
+    } finally {
+      busy = false;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var b = getBtn();
+    if (!b) return;
+    b.textContent = BTN_SUBMIT;
+    b.addEventListener('click', onBtnClick);
+  });
+})();
     </script>
 </body>
 </html>

@@ -17,6 +17,7 @@
         .correct-ans { color: #27ae60; font-weight: bold; }
         #btn-submit { display: block; width: 200px; height: 50px; margin: 30px auto; background: #3498db; color: #fff; border: none; border-radius: 25px; font-size: 1.1em; cursor: pointer; }
         #btn-submit:hover { background: #2980b9; }
+        #btn-submit.exam-btn-redo { background: #bdc3c7 !important; color: #fff !important; cursor: pointer; box-shadow: none; }
         #result-box { display: none; background: #fff; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px; border: 2px solid #3498db; }
         .score { font-size: 2em; color: #e74c3c; font-weight: bold; }
         .status-correct { background-color: #d4edda !important; }
@@ -367,7 +368,7 @@
     </form>
 
     <div id="submit-area" style="text-align:center">
-        <button type="button" id="btn-submit" onclick="checkAnswers()">提交试卷</button>
+        <button type="button" id="btn-submit">提交试卷</button>
     </div>
 
     <div id="result-box">
@@ -377,56 +378,115 @@
     </div>
 
     <script>
-        function checkAnswers() {
-            const totalQuestions = 30;
-            const pointsPerQuestion = 100 / totalQuestions;
-            let score = 0;
-            let correctCount = 0;
+(function () {
+  var BTN_SUBMIT = '提交试卷';
+  var BTN_REDO = '重做试题';
+  var busy = false;
 
-            const questions = document.querySelectorAll('.question');
-            
-            questions.forEach((q, index) => {
-                const selected = q.querySelector('input:checked');
-                const correctAnswer = q.querySelector('input[data-cor="true"]');
-                const explanation = q.querySelector('.explanation');
-                
-                // 显示解析
-                explanation.style.display = 'block';
+  function getBtn() { return document.getElementById('btn-submit'); }
 
-                if (selected) {
-                    if (selected.dataset.cor === "true") {
-                        score += pointsPerQuestion;
-                        correctCount++;
-                        q.classList.add('status-correct');
-                    } else {
-                        q.classList.add('status-wrong');
-                    }
-                } else {
-                    q.classList.add('status-wrong'); // 未选按错处理
-                }
-                
-                // 标记正确选项的样式
-                if (correctAnswer && correctAnswer.parentElement) {
-                    correctAnswer.parentElement.style.color = '#27ae60';
-                    correctAnswer.parentElement.style.fontWeight = 'bold';
-                }
-            });
+  function setBtnRedo() {
+    var b = getBtn();
+    if (!b) return;
+    b.textContent = BTN_REDO;
+    b.classList.add('exam-btn-redo');
+  }
 
-            // 显示统计
-            document.getElementById('result-box').style.display = 'block';
-            document.getElementById('score-display').innerText = Math.round(score);
-            document.getElementById('stat-display').innerText = `正确题数：${correctCount} | 错误题数：${totalQuestions - correctCount}`;
-            
-            // 滚动到结果
-            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  function setBtnSubmit() {
+    var b = getBtn();
+    if (!b) return;
+    b.textContent = BTN_SUBMIT;
+    b.classList.remove('exam-btn-redo');
+  }
 
-            var sb = document.getElementById('btn-submit');
-            if (sb) {
-                sb.disabled = true;
-                sb.style.background = '#bdc3c7';
-                sb.innerText = '已提交';
-            }
+  function resetExam() {
+    var form = document.getElementById('quizForm');
+    if (form) form.reset();
+    document.querySelectorAll('.question').forEach(function (q) {
+      q.classList.remove('status-correct', 'status-wrong');
+      q.querySelectorAll('.options label').forEach(function (lab) {
+        lab.style.color = '';
+        lab.style.fontWeight = '';
+      });
+      var ex = q.querySelector('.explanation');
+      if (ex) ex.style.display = 'none';
+    });
+    var box = document.getElementById('result-box');
+    if (box) box.style.display = 'none';
+  }
+
+  function runGrade() {
+    var totalQuestions = 30;
+    var pointsPerQuestion = 100 / totalQuestions;
+    var score = 0;
+    var correctCount = 0;
+    document.querySelectorAll('.question').forEach(function (q) {
+      var selected = q.querySelector('input:checked');
+      var correctAnswer = q.querySelector('input[data-cor="true"]');
+      var explanation = q.querySelector('.explanation');
+      if (explanation) explanation.style.display = 'block';
+      if (selected) {
+        if (selected.getAttribute('data-cor') === 'true') {
+          score += pointsPerQuestion;
+          correctCount++;
+          q.classList.add('status-correct');
+        } else {
+          q.classList.add('status-wrong');
         }
+      } else {
+        q.classList.add('status-wrong');
+      }
+      if (correctAnswer && correctAnswer.parentElement) {
+        correctAnswer.parentElement.style.color = '#27ae60';
+        correctAnswer.parentElement.style.fontWeight = 'bold';
+      }
+    });
+    var resultBox = document.getElementById('result-box');
+    if (resultBox) {
+      resultBox.style.display = 'block';
+      resultBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    var sd = document.getElementById('score-display');
+    if (sd) sd.textContent = String(Math.round(score));
+    var st = document.getElementById('stat-display');
+    if (st) st.textContent = '正确题数：' + correctCount + ' | 错误题数：' + (totalQuestions - correctCount);
+  }
+
+  function onBtnClick(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (busy) return;
+    var b = getBtn();
+    if (!b) return;
+    var label = (b.textContent || '').trim();
+    if (label === BTN_REDO) {
+      busy = true;
+      try {
+        resetExam();
+        setBtnSubmit();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } finally {
+        busy = false;
+      }
+      return;
+    }
+    if (label !== BTN_SUBMIT) return;
+    busy = true;
+    try {
+      runGrade();
+      setBtnRedo();
+    } finally {
+      busy = false;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var b = getBtn();
+    if (!b) return;
+    b.textContent = BTN_SUBMIT;
+    b.addEventListener('click', onBtnClick);
+  });
+})();
     </script>
 </body>
 </html>

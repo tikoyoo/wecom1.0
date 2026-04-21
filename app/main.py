@@ -2110,78 +2110,6 @@ def _exam_id_for_filename(filename: str) -> str:
     return hashlib.sha1(filename.encode("utf-8")).hexdigest()[:12]
 
 
-def _inject_exam_redo_script(html_text: str, exam_id: str) -> str:
-    marker = "__EXAM_REDO_INJECTED__"
-    if marker in html_text:
-        return html_text
-    script = f"""
-<script>
-/* {marker} */
-(function() {{
-  var storageKey = "exam_submitted_" + {json.dumps(exam_id)};
-  function readBtnText(btn) {{
-    if (!btn) return "";
-    if (btn.tagName === "INPUT") return String(btn.value || "");
-    return String(btn.innerText || btn.textContent || "");
-  }}
-  function writeBtnText(btn, text) {{
-    if (!btn) return;
-    if (btn.tagName === "INPUT") btn.value = text;
-    else btn.textContent = text;
-  }}
-  function findSubmitButton() {{
-    var fixed = document.getElementById("btn-submit") || document.getElementById("submit-btn");
-    if (fixed) return fixed;
-    var btns = document.querySelectorAll("button, input[type='button'], input[type='submit']");
-    for (var i = 0; i < btns.length; i++) {{
-      var t = readBtnText(btns[i]).trim();
-      if (t.indexOf("提交") >= 0 || t.indexOf("试卷") >= 0 || t.indexOf("试题") >= 0) return btns[i];
-    }}
-    return null;
-  }}
-  function applyRedoState() {{
-    if (localStorage.getItem(storageKey) !== "1") return;
-    var btn = findSubmitButton();
-    if (!btn) return;
-    btn.disabled = false;
-    writeBtnText(btn, "重做试题");
-    btn.onclick = function(e) {{
-      e.preventDefault();
-      localStorage.removeItem(storageKey);
-      location.reload();
-    }};
-  }}
-  function bindSubmitWatcher() {{
-    /** 使用冒泡阶段 + setTimeout(0)，确保试卷内联 onclick（checkAnswers/gradeQuiz/grade）先完整执行，再切换「重做」状态 */
-    document.addEventListener("click", function(e) {{
-      var btn = findSubmitButton();
-      if (!btn) return;
-      var target = e.target && e.target.closest ? e.target.closest("button, input[type='button'], input[type='submit']") : null;
-      if (!target || target !== btn) return;
-      var txt = readBtnText(btn).trim();
-      if (txt.indexOf("重做试题") >= 0) return;
-      if (txt.indexOf("提交") < 0 && txt.indexOf("试卷") < 0 && txt.indexOf("试题") < 0) return;
-      setTimeout(function() {{
-        localStorage.setItem(storageKey, "1");
-        applyRedoState();
-      }}, 0);
-    }});
-  }}
-  window.addEventListener("load", function() {{
-    bindSubmitWatcher();
-    applyRedoState();
-    setTimeout(applyRedoState, 250);
-  }});
-}})();
-</script>
-"""
-    lower = html_text.lower()
-    pos = lower.rfind("</body>")
-    if pos >= 0:
-        return html_text[:pos] + script + "\n" + html_text[pos:]
-    return html_text + "\n" + script
-
-
 def _render_exam_home(exams: list[dict]) -> str:
     exams_json = json.dumps(exams, ensure_ascii=False)
     return f"""<!doctype html>
@@ -2474,7 +2402,7 @@ async def exam_paper(exam_id: str):
     if not fp.exists():
         raise HTTPException(status_code=404, detail="exam file not found")
     raw = fp.read_text(encoding="utf-8", errors="ignore")
-    return HTMLResponse(_inject_exam_redo_script(raw, eid))
+    return HTMLResponse(raw)
 
 
 @app.get("/admin/exams", response_class=HTMLResponse)
