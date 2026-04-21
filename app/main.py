@@ -2152,17 +2152,20 @@ def _inject_exam_redo_script(html_text: str, exam_id: str) -> str:
     }};
   }}
   function bindSubmitWatcher() {{
+    /** 使用冒泡阶段 + setTimeout(0)，确保试卷内联 onclick（checkAnswers/gradeQuiz/grade）先完整执行，再切换「重做」状态 */
     document.addEventListener("click", function(e) {{
+      var btn = findSubmitButton();
+      if (!btn) return;
       var target = e.target && e.target.closest ? e.target.closest("button, input[type='button'], input[type='submit']") : null;
-      if (!target) return;
-      var txt = readBtnText(target).trim();
+      if (!target || target !== btn) return;
+      var txt = readBtnText(btn).trim();
       if (txt.indexOf("重做试题") >= 0) return;
       if (txt.indexOf("提交") < 0 && txt.indexOf("试卷") < 0 && txt.indexOf("试题") < 0) return;
       setTimeout(function() {{
         localStorage.setItem(storageKey, "1");
         applyRedoState();
-      }}, 10);
-    }}, true);
+      }}, 0);
+    }});
   }}
   window.addEventListener("load", function() {{
     bindSubmitWatcher();

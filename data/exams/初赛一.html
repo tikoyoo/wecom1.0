@@ -15,8 +15,8 @@
         .options input { margin-right: 10px; }
         .explanation { display: none; margin-top: 15px; padding: 10px; background: #e8f4fd; border-left: 5px solid #3498db; font-size: 0.9em; }
         .correct-ans { color: #27ae60; font-weight: bold; }
-        #submit-btn { display: block; width: 200px; height: 50px; margin: 30px auto; background: #3498db; color: #fff; border: none; border-radius: 25px; font-size: 1.1em; cursor: pointer; }
-        #submit-btn:hover { background: #2980b9; }
+        #btn-submit { display: block; width: 200px; height: 50px; margin: 30px auto; background: #3498db; color: #fff; border: none; border-radius: 25px; font-size: 1.1em; cursor: pointer; }
+        #btn-submit:hover { background: #2980b9; }
         #result-box { display: none; background: #fff; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px; border: 2px solid #3498db; }
         .score { font-size: 2em; color: #e74c3c; font-weight: bold; }
         .status-correct { background-color: #d4edda !important; }
@@ -366,7 +366,9 @@
 
     </form>
 
-    <button id="submit-btn" onclick="checkAnswers()">提交试卷</button>
+    <div id="submit-area" style="text-align:center">
+        <button type="button" id="btn-submit" onclick="checkAnswers()">提交试卷</button>
+    </div>
 
     <div id="result-box">
         <p>您的得分：<span class="score" id="score-display">0</span> / 100</p>
@@ -404,8 +406,10 @@
                 }
                 
                 // 标记正确选项的样式
-                correctAnswer.parentElement.style.color = '#27ae60';
-                correctAnswer.parentElement.style.fontWeight = 'bold';
+                if (correctAnswer && correctAnswer.parentElement) {
+                    correctAnswer.parentElement.style.color = '#27ae60';
+                    correctAnswer.parentElement.style.fontWeight = 'bold';
+                }
             });
 
             // 显示统计
@@ -415,6 +419,13 @@
             
             // 滚动到结果
             window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+
+            var sb = document.getElementById('btn-submit');
+            if (sb) {
+                sb.disabled = true;
+                sb.style.background = '#bdc3c7';
+                sb.innerText = '已提交';
+            }
         }
     </script>
 </body>

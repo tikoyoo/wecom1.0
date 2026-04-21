@@ -14,8 +14,8 @@
         .options label:hover { background-color: #f8f9fa; }
         .options input { margin-right: 12px; }
         .explanation { display: none; margin-top: 15px; padding: 12px; background: #e7f3ff; border-left: 4px solid #1a73e8; font-size: 0.95em; }
-        #submit-btn { display: block; width: 220px; height: 50px; margin: 30px auto; background: #1a73e8; color: #fff; border: none; border-radius: 25px; font-size: 1.1em; cursor: pointer; transition: 0.3s; }
-        #submit-btn:hover { background: #1765cf; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }
+        #btn-submit { display: block; width: 220px; height: 50px; margin: 30px auto; background: #1a73e8; color: #fff; border: none; border-radius: 25px; font-size: 1.1em; cursor: pointer; transition: 0.3s; }
+        #btn-submit:hover { background: #1765cf; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }
         #result-box { display: none; background: #fff; padding: 25px; border-radius: 8px; text-align: center; margin-top: 20px; border: 2px solid #1a73e8; }
         .score-val { font-size: 2.5em; color: #d93025; font-weight: bold; }
         .status-correct { border: 2px solid #34a853 !important; background-color: #e6f4ea !important; }
@@ -364,7 +364,9 @@
 
     </form>
 
-    <button id="submit-btn" onclick="gradeQuiz()">提交试卷并显示解析</button>
+    <div id="submit-area" style="text-align:center">
+        <button type="button" id="btn-submit" onclick="gradeQuiz()">提交试卷并显示解析</button>
+    </div>
 
     <div id="result-box">
         <p>您的得分：<span class="score-val" id="score-display">0</span> / 100</p>
@@ -406,8 +408,10 @@
                 }
                 
                 // 高亮正确选项
-                correctOption.parentElement.style.color = '#188038';
-                correctOption.parentElement.style.fontWeight = 'bold';
+                if (correctOption && correctOption.parentElement) {
+                    correctOption.parentElement.style.color = '#188038';
+                    correctOption.parentElement.style.fontWeight = 'bold';
+                }
             });
 
             // 结果统计显示
@@ -418,6 +422,13 @@
             
             // 自动跳转到结果区域
             window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+
+            var sb = document.getElementById('btn-submit');
+            if (sb) {
+                sb.disabled = true;
+                sb.style.background = '#bdc3c7';
+                sb.innerText = '已提交';
+            }
         }
     </script>
 </body>
